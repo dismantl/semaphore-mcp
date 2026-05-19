@@ -1134,10 +1134,23 @@ class SemaphoreAPIClient:
         )
 
     # Access Key endpoints
-    def list_access_keys(self, project_id: int) -> list[dict[str, Any]]:
+    def list_access_keys(
+        self,
+        project_id: int,
+        key_type: Optional[str] = None,
+        sort: str = "name",
+        order: str = "asc",
+    ) -> list[dict[str, Any]]:
         """List all access keys for a project."""
-        result = self._request("GET", f"project/{project_id}/keys")
-        return result if isinstance(result, list) else []
+        result = self._request(
+            "GET",
+            f"project/{project_id}/keys",
+            params={"sort": sort, "order": order},
+        )
+        keys: list[dict[str, Any]] = result if isinstance(result, list) else []
+        if key_type is not None:
+            keys = [key for key in keys if key.get("type") == key_type]
+        return keys
 
     def get_access_key(self, project_id: int, key_id: int) -> dict[str, Any]:
         """Get an access key by ID."""
@@ -1188,6 +1201,7 @@ class SemaphoreAPIClient:
         login: Optional[str] = None,
         password: Optional[str] = None,
         private_key: Optional[str] = None,
+        override_secret: Optional[bool] = None,
     ) -> dict[str, Any]:
         """Update an existing access key.
 
@@ -1199,20 +1213,35 @@ class SemaphoreAPIClient:
             login: Username (optional)
             password: Password (optional)
             private_key: Private key content (optional)
+            override_secret: Whether to update stored secret material (optional)
 
         Returns:
             Updated access key information
         """
-        payload: dict[str, Any] = {"id": key_id, "project_id": project_id}
+        existing = self.get_access_key(project_id, key_id)
+        payload: dict[str, Any] = {
+            "id": key_id,
+            "project_id": project_id,
+            "name": name if name is not None else existing.get("name", ""),
+            "type": key_type if key_type is not None else existing.get("type", "none"),
+        }
 
-        if name is not None:
-            payload["name"] = name
-        if key_type is not None:
-            payload["type"] = key_type
-        if key_type == "login_password" and login:
-            payload["login_password"] = {"login": login, "password": password or ""}
-        elif key_type == "ssh" and private_key:
-            payload["ssh"] = {"login": login or "", "private_key": private_key}
+        should_override_secret = override_secret
+        if should_override_secret is None:
+            should_override_secret = any(
+                value is not None for value in (key_type, password, private_key)
+            )
+        if should_override_secret:
+            payload["override_secret"] = True
+
+        effective_type = payload["type"]
+        if effective_type == "login_password" and (login is not None or password):
+            payload["login_password"] = {
+                "login": login or "",
+                "password": password or "",
+            }
+        elif effective_type == "ssh" and (login is not None or private_key):
+            payload["ssh"] = {"login": login or "", "private_key": private_key or ""}
 
         return self._request("PUT", f"project/{project_id}/keys/{key_id}", json=payload)
 

@@ -1136,6 +1136,95 @@ class TestAPIClientErrorHandling:
             assert "Invalid JSON response" in str(exc_info.value)
 
 
+class TestAccessKeyOperations:
+    """Test access key operations in API client."""
+
+    @pytest.fixture
+    def mock_client(self):
+        """Create a mock API client for testing."""
+        return SemaphoreAPIClient("http://test.example.com", "test-token")
+
+    def test_list_access_keys_with_sorting(self, mock_client):
+        """Test list_access_keys passes sort parameters."""
+        mock_response = [
+            {"id": 1, "name": "None Key", "type": "none"},
+            {"id": 2, "name": "SSH Key", "type": "ssh"},
+        ]
+        with patch.object(
+            mock_client, "_request", return_value=mock_response
+        ) as mock_request:
+            result = mock_client.list_access_keys(1, sort="type", order="desc")
+            assert result == mock_response
+            mock_request.assert_called_once_with(
+                "GET",
+                "project/1/keys",
+                params={"sort": "type", "order": "desc"},
+            )
+
+    def test_list_access_keys_filters_by_type(self, mock_client):
+        """Test list_access_keys filters by key type."""
+        mock_response = [
+            {"id": 1, "name": "None Key", "type": "none"},
+            {"id": 2, "name": "SSH Key", "type": "ssh"},
+        ]
+        with patch.object(mock_client, "_request", return_value=mock_response):
+            result = mock_client.list_access_keys(1, key_type="ssh")
+            assert result == [{"id": 2, "name": "SSH Key", "type": "ssh"}]
+
+    def test_get_access_key(self, mock_client):
+        """Test get_access_key method."""
+        mock_response = {"id": 2, "name": "SSH Key", "type": "ssh"}
+        with patch.object(
+            mock_client, "_request", return_value=mock_response
+        ) as mock_request:
+            result = mock_client.get_access_key(1, 2)
+            assert result == mock_response
+            mock_request.assert_called_once_with("GET", "project/1/keys/2")
+
+    def test_update_access_key_name_only_preserves_existing_type(self, mock_client):
+        """Test update_access_key preserves existing key fields for renames."""
+        existing_key = {"id": 2, "name": "Old Key", "type": "none"}
+        with patch.object(mock_client, "get_access_key", return_value=existing_key):
+            with patch.object(mock_client, "_request", return_value={}) as mock_request:
+                result = mock_client.update_access_key(1, 2, name="Renamed Key")
+                assert result == {}
+                mock_request.assert_called_once_with(
+                    "PUT",
+                    "project/1/keys/2",
+                    json={
+                        "id": 2,
+                        "project_id": 1,
+                        "name": "Renamed Key",
+                        "type": "none",
+                    },
+                )
+
+    def test_update_access_key_login_password_secret(self, mock_client):
+        """Test update_access_key can replace login_password secret material."""
+        existing_key = {"id": 2, "name": "Service Key", "type": "login_password"}
+        with patch.object(mock_client, "get_access_key", return_value=existing_key):
+            with patch.object(mock_client, "_request", return_value={}) as mock_request:
+                result = mock_client.update_access_key(
+                    1,
+                    2,
+                    login="service",
+                    password="secret",
+                )
+                assert result == {}
+                mock_request.assert_called_once_with(
+                    "PUT",
+                    "project/1/keys/2",
+                    json={
+                        "id": 2,
+                        "project_id": 1,
+                        "name": "Service Key",
+                        "type": "login_password",
+                        "override_secret": True,
+                        "login_password": {"login": "service", "password": "secret"},
+                    },
+                )
+
+
 class TestCreateClientFunction:
     """Test the create_client factory function."""
 
