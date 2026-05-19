@@ -166,7 +166,9 @@ class SemaphoreMCPServer:
 
         # Access key tools
         self.mcp.tool()(self.access_key_tools.list_access_keys)
+        self.mcp.tool()(self.access_key_tools.get_access_key)
         self.mcp.tool()(self.access_key_tools.create_access_key)
+        self.mcp.tool()(self.access_key_tools.update_access_key)
         self.mcp.tool()(self.access_key_tools.delete_access_key)
 
     # Tool methods have been moved to dedicated tool classes

@@ -1,6 +1,7 @@
 """E2E tests for Access Key tools.
 
-Exposed MCP tools: list_access_keys, create_access_key, delete_access_key.
+Exposed MCP tools: list_access_keys, get_access_key, create_access_key,
+update_access_key, delete_access_key.
 """
 
 import sys
@@ -69,6 +70,65 @@ class TestAccessKeysE2E:
         assert "id" in access_key
         assert access_key["name"] == "E2E Login Key"
         assert access_key["type"] == "login_password"
+
+    def test_get_access_key(self, inspector: MCPInspector, created_project: dict):
+        """Test getting an access key by ID."""
+        project_id = created_project["id"]
+
+        create_result = inspector.call_tool(
+            "create_access_key",
+            {
+                "project_id": project_id,
+                "name": "E2E Key To Get",
+                "key_type": "none",
+            },
+        )
+        created_key = parse_mcp_response(create_result)
+
+        get_result = inspector.call_tool(
+            "get_access_key",
+            {"project_id": project_id, "key_id": created_key["id"]},
+        )
+        access_key = parse_mcp_response(get_result)
+
+        assert access_key["id"] == created_key["id"]
+        assert access_key["name"] == "E2E Key To Get"
+        assert access_key["type"] == "none"
+
+    def test_update_access_key_name(
+        self, inspector: MCPInspector, created_project: dict
+    ):
+        """Test updating an access key name."""
+        project_id = created_project["id"]
+
+        create_result = inspector.call_tool(
+            "create_access_key",
+            {
+                "project_id": project_id,
+                "name": "E2E Key Before Rename",
+                "key_type": "none",
+            },
+        )
+        created_key = parse_mcp_response(create_result)
+
+        update_result = inspector.call_tool(
+            "update_access_key",
+            {
+                "project_id": project_id,
+                "key_id": created_key["id"],
+                "name": "E2E Key After Rename",
+            },
+        )
+        assert update_result is not None
+
+        get_result = inspector.call_tool(
+            "get_access_key",
+            {"project_id": project_id, "key_id": created_key["id"]},
+        )
+        access_key = parse_mcp_response(get_result)
+
+        assert access_key["name"] == "E2E Key After Rename"
+        assert access_key["type"] == "none"
 
     def test_create_and_list_access_keys(
         self, inspector: MCPInspector, created_project: dict

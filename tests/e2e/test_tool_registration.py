@@ -84,6 +84,12 @@ EXPECTED_TOOLS = {
     "create_repository",
     "update_repository",
     "delete_repository",
+    # Access key tools (5)
+    "list_access_keys",
+    "get_access_key",
+    "create_access_key",
+    "update_access_key",
+    "delete_access_key",
 }
 
 

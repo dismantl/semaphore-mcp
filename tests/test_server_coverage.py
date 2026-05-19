@@ -24,6 +24,7 @@ class TestSemaphoreMCPServerCoverage:
         assert server.template_tools is not None
         assert server.task_tools is not None
         assert server.environment_tools is not None
+        assert server.access_key_tools is not None
         assert server.schedule_tools is not None
         assert server.view_tools is not None
 
@@ -133,6 +134,7 @@ class TestSemaphoreMCPServerCoverage:
             assert server.template_tools.semaphore == mock_semaphore
             assert server.task_tools.semaphore == mock_semaphore
             assert server.environment_tools.semaphore == mock_semaphore
+            assert server.access_key_tools.semaphore == mock_semaphore
             assert server.schedule_tools.semaphore == mock_semaphore
             assert server.view_tools.semaphore == mock_semaphore
 
@@ -188,6 +190,7 @@ class TestSemaphoreMCPServerCoverage:
             "template_tools",
             "task_tools",
             "environment_tools",
+            "access_key_tools",
             "schedule_tools",
             "view_tools",
         ]
