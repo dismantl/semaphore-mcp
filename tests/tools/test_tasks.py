@@ -7,6 +7,17 @@ from unittest.mock import AsyncMock, MagicMock, Mock
 import pytest
 import requests
 
+SAMPLE_LOG = "\n".join(
+    [
+        "PLAY [all] ***",
+        "TASK [web : deploy] ***",
+        "ok: [hostA]",
+        'fatal: [hostB]: FAILED! => {"msg": "boom"}',
+        "PLAY RECAP ***",
+        "hostB : ok=1 changed=0 failed=1",
+    ]
+)
+
 
 class TestTaskTools:
     """Test suite for TaskTools class methods."""
@@ -785,6 +796,99 @@ class TestTaskTools:
             task_tools._load_lines(1, task_id)
 
         assert len(task_tools._output_cache) == task_tools.OUTPUT_CACHE_MAXSIZE
+
+    @pytest.mark.asyncio
+    async def test_get_task_output_tail_default(self, task_tools):
+        """Test get_task_output defaults to bounded tail mode."""
+        task_tools.semaphore.get_task.return_value = {"status": "error"}
+        task_tools.semaphore.get_task_raw_output.return_value = SAMPLE_LOG
+
+        result = await task_tools.get_task_output(1, 42)
+
+        assert result["mode"] == "tail"
+        assert result["total_lines"] == 6
+        assert result["lines"][-1].startswith("hostB :")
+        assert result["truncated"] is False
+
+    @pytest.mark.asyncio
+    async def test_get_task_output_search(self, task_tools):
+        """Test get_task_output search mode."""
+        task_tools.semaphore.get_task.return_value = {"status": "error"}
+        task_tools.semaphore.get_task_raw_output.return_value = SAMPLE_LOG
+
+        result = await task_tools.get_task_output(
+            1, 42, mode="search", pattern="fatal:"
+        )
+
+        assert result["match_count"] == 1
+        assert any(e["is_match"] for e in result["entries"])
+
+    @pytest.mark.asyncio
+    async def test_get_task_output_search_requires_pattern(self, task_tools):
+        """Test search mode requires a pattern."""
+        task_tools.semaphore.get_task.return_value = {"status": "error"}
+        task_tools.semaphore.get_task_raw_output.return_value = SAMPLE_LOG
+
+        result = await task_tools.get_task_output(1, 42, mode="search")
+
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_get_task_output_failed_mode(self, task_tools):
+        """Test failed mode extracts failed task blocks."""
+        task_tools.semaphore.get_task.return_value = {"status": "error"}
+        task_tools.semaphore.get_task_raw_output.return_value = SAMPLE_LOG
+
+        result = await task_tools.get_task_output(1, 42, mode="failed")
+
+        assert result["fatal_count"] == 1
+        assert result["blocks"][0]["host"] == "hostB"
+
+    @pytest.mark.asyncio
+    async def test_get_task_output_timestamps_use_structured(self, task_tools):
+        """Test timestamped reads use structured output records."""
+        task_tools.semaphore.get_task.return_value = {"status": "error"}
+        task_tools.semaphore.get_task_output.return_value = [
+            {"output": "line0", "time": "t0", "stage_id": 1},
+            {"output": "line1", "time": "t1", "stage_id": 2},
+        ]
+
+        result = await task_tools.get_task_output(
+            1, 42, mode="tail", include_timestamps=True
+        )
+
+        assert result["lines"][-1] == {"time": "t1", "text": "line1"}
+
+    @pytest.mark.asyncio
+    async def test_get_task_output_stage_filter_recomputes_totals(self, task_tools):
+        """Test stage filtering recomputes totals for the filtered list."""
+        task_tools.semaphore.get_task.return_value = {"status": "error"}
+        task_tools.semaphore.get_task_output.return_value = [
+            {"output": "aaaa", "time": "t0", "stage_id": 1},
+            {"output": "bbbb", "time": "t1", "stage_id": 2},
+            {"output": "cccc", "time": "t2", "stage_id": 2},
+        ]
+
+        result = await task_tools.get_task_output(1, 42, mode="head", stage_id=2)
+
+        assert result["total_lines"] == 2
+        assert result["total_bytes"] == 8
+        assert [
+            li if isinstance(li, str) else li["text"] for li in result["lines"]
+        ] == [
+            "bbbb",
+            "cccc",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_get_task_output_unknown_mode(self, task_tools):
+        """Test unknown mode returns a bounded error response."""
+        task_tools.semaphore.get_task.return_value = {"status": "error"}
+        task_tools.semaphore.get_task_raw_output.return_value = SAMPLE_LOG
+
+        result = await task_tools.get_task_output(1, 42, mode="bogus")
+
+        assert "error" in result
 
     @pytest.mark.asyncio
     async def test_analyze_task_failure(self, task_tools):

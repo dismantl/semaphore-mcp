@@ -12,7 +12,16 @@ from typing import Any, Optional, Union
 
 import requests  # type: ignore
 
-from ..output_utils import split_lines, strip_ansi
+from ..output_utils import (
+    CHANGED_RE,
+    FAILURE_RE,
+    clamp,
+    extract_blocks,
+    search,
+    split_lines,
+    strip_ansi,
+    window,
+)
 from .base import BaseTool
 
 logger = logging.getLogger(__name__)
@@ -994,6 +1003,86 @@ class TaskTools(BaseTool):
             return self.semaphore.get_task_raw_output(project_id, task_id)
         except Exception as e:
             self.handle_error(e, f"getting raw output for task {task_id}")
+
+    async def get_task_output(
+        self,
+        project_id: int,
+        task_id: int,
+        mode: str = "tail",
+        max_lines: int = DEFAULT_MAX_LINES,
+        offset: int = 0,
+        pattern: Optional[str] = None,
+        regex: bool = False,
+        context_lines: int = 3,
+        include_timestamps: bool = False,
+        stage_id: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """Read a bounded window of task output.
+
+        Modes: tail, head, range, search, failed, changed. Timestamped reads and
+        stage filtering use Semaphore's structured output endpoint; other reads
+        use raw output by default.
+        """
+        try:
+            valid_modes = ["tail", "head", "range", "search", "failed", "changed"]
+            if mode not in valid_modes:
+                return {"error": f"unknown mode {mode!r}", "valid_modes": valid_modes}
+            if mode == "search" and not pattern:
+                return {"error": "mode='search' requires a non-empty 'pattern'."}
+
+            max_lines = clamp(max_lines, 1, self.MAX_LINES_CAP)
+            context_lines = clamp(context_lines, 0, self.MAX_LINES_CAP)
+            structured = include_timestamps or stage_id is not None
+            lines, times, stages, total_bytes = self._load_lines(
+                project_id, task_id, structured=structured
+            )
+
+            if stage_id is not None and stages is not None:
+                keep = [i for i, stage in enumerate(stages) if stage == stage_id]
+                lines = [lines[i] for i in keep]
+                times = [times[i] for i in keep] if times is not None else None
+                total_bytes = sum(len(line.encode("utf-8")) for line in lines)
+
+            result: dict[str, Any] = {
+                "task_id": task_id,
+                "mode": mode,
+                "total_lines": len(lines),
+                "total_bytes": total_bytes,
+            }
+
+            if mode in ("tail", "head", "range"):
+                output_window = window(lines, mode, max_lines, offset)
+                result.update(output_window)
+                if include_timestamps and times is not None:
+                    start = output_window["returned_range"][0]
+                    result["lines"] = [
+                        {"time": times[start + i], "text": text}
+                        for i, text in enumerate(output_window["lines"])
+                    ]
+            elif mode == "search":
+                search_result = search(
+                    lines, pattern or "", regex, context_lines, max_lines
+                )
+                result.update(search_result)
+                if (
+                    include_timestamps
+                    and times is not None
+                    and search_result.get("entries")
+                ):
+                    for entry in search_result["entries"]:
+                        entry["time"] = times[entry["line"]]
+            else:
+                marker = FAILURE_RE if mode == "failed" else CHANGED_RE
+                blocks, total = extract_blocks(
+                    lines, marker, self.MAX_FAILURE_BLOCKS, self.LINES_PER_BLOCK
+                )
+                result["fatal_count" if mode == "failed" else "changed_count"] = total
+                result["blocks"] = blocks
+                result["truncated"] = total > len(blocks)
+
+            return result
+        except Exception as e:
+            self.handle_error(e, f"getting output window for task {task_id}")
 
     async def analyze_task_failure(
         self, project_id: int, task_id: int

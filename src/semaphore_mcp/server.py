@@ -127,6 +127,7 @@ class SemaphoreMCPServer:
         self.mcp.tool()(self.task_tools.get_task)
         self.mcp.tool()(self.task_tools.run_task)
         self.mcp.tool()(self.task_tools.get_latest_failed_task)
+        self.mcp.tool()(self.task_tools.get_task_output)
 
         # Enhanced task tools - filtering and bulk operations
         self.mcp.tool()(self.task_tools.filter_tasks)
