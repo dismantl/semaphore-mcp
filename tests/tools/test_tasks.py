@@ -675,6 +675,118 @@ class TestTaskTools:
         assert "Error during getting raw output for task" in str(excinfo.value)
 
     @pytest.mark.asyncio
+    async def test_load_lines_raw_default(self, task_tools):
+        """Test _load_lines defaults to raw output."""
+        task_tools.semaphore.get_task.return_value = {"status": "success"}
+        task_tools.semaphore.get_task_raw_output.return_value = "a\nb\nc"
+
+        lines, times, stages, total_bytes = task_tools._load_lines(1, 42)
+
+        assert lines == ["a", "b", "c"]
+        assert times is None
+        assert stages is None
+        assert total_bytes == 5
+
+    @pytest.mark.asyncio
+    async def test_load_lines_structured(self, task_tools):
+        """Test _load_lines can normalize structured output records."""
+        task_tools.semaphore.get_task.return_value = {"status": "success"}
+        task_tools.semaphore.get_task_output.return_value = [
+            {"output": "a", "time": "t0", "stage_id": 1},
+            {"output": "b", "time": "t1", "stage_id": 2},
+        ]
+
+        lines, times, stages, _ = task_tools._load_lines(1, 42, structured=True)
+
+        assert lines == ["a", "b"]
+        assert times == ["t0", "t1"]
+        assert stages == [1, 2]
+
+    @pytest.mark.asyncio
+    async def test_load_lines_strips_structured_ansi(self, task_tools):
+        """Test structured output ANSI is stripped at normalization time."""
+        task_tools.semaphore.get_task.return_value = {"status": "success"}
+        task_tools.semaphore.get_task_output.return_value = [
+            {"output": "\x1b[31mfatal:\x1b[0m boom", "time": "t0", "stage_id": 1}
+        ]
+
+        lines, _, _, _ = task_tools._load_lines(1, 42, structured=True)
+
+        assert lines == ["fatal: boom"]
+
+    @pytest.mark.asyncio
+    async def test_load_lines_expands_structured_embedded_newlines(self, task_tools):
+        """Test embedded newlines in structured records become line entries."""
+        task_tools.semaphore.get_task.return_value = {"status": "success"}
+        task_tools.semaphore.get_task_output.return_value = [
+            {"output": "a\nb", "time": "t0", "stage_id": 1},
+            {"output": "c", "time": "t1", "stage_id": 2},
+        ]
+
+        lines, times, stages, _ = task_tools._load_lines(1, 42, structured=True)
+
+        assert lines == ["a", "b", "c"]
+        assert times == ["t0", "t0", "t1"]
+        assert stages == [1, 1, 2]
+
+    @pytest.mark.asyncio
+    async def test_load_lines_preserves_structured_empty_records(self, task_tools):
+        """Test empty structured output records remain blank log lines."""
+        task_tools.semaphore.get_task.return_value = {"status": "success"}
+        task_tools.semaphore.get_task_output.return_value = [
+            {"output": "", "time": "t0", "stage_id": 1},
+            {"output": "after", "time": "t1", "stage_id": 1},
+        ]
+
+        lines, times, stages, _ = task_tools._load_lines(1, 42, structured=True)
+
+        assert lines == ["", "after"]
+        assert times == ["t0", "t1"]
+        assert stages == [1, 1]
+
+    @pytest.mark.asyncio
+    async def test_load_lines_caches_completed_task(self, task_tools):
+        """Test completed task output is cached."""
+        task_tools.semaphore.get_task.return_value = {"status": "success"}
+        task_tools.semaphore.get_task_raw_output.return_value = "a\nb"
+
+        task_tools._load_lines(1, 42)
+        task_tools._load_lines(1, 42)
+
+        assert task_tools.semaphore.get_task_raw_output.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_load_lines_does_not_cache_running_task(self, task_tools):
+        """Test running task output is not cached."""
+        task_tools.semaphore.get_task.return_value = {"status": "running"}
+        task_tools.semaphore.get_task_raw_output.return_value = "a\nb"
+
+        task_tools._load_lines(1, 42)
+        task_tools._load_lines(1, 42)
+
+        assert task_tools.semaphore.get_task_raw_output.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_load_lines_status_passed_skips_get_task(self, task_tools):
+        """Test known status skips the task status lookup."""
+        task_tools.semaphore.get_task_raw_output.return_value = "a"
+
+        task_tools._load_lines(1, 42, status="success")
+
+        task_tools.semaphore.get_task.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_output_cache_evicts_lru(self, task_tools):
+        """Test output cache keeps only the configured LRU size."""
+        task_tools.semaphore.get_task.return_value = {"status": "success"}
+        task_tools.semaphore.get_task_raw_output.return_value = "x"
+
+        for task_id in range(task_tools.OUTPUT_CACHE_MAXSIZE + 2):
+            task_tools._load_lines(1, task_id)
+
+        assert len(task_tools._output_cache) == task_tools.OUTPUT_CACHE_MAXSIZE
+
+    @pytest.mark.asyncio
     async def test_analyze_task_failure(self, task_tools):
         """Test analyze_task_failure method for a failed task."""
         project_id = 1

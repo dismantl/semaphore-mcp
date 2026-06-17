@@ -7,10 +7,12 @@ This module provides tools for interacting with Semaphore tasks.
 import asyncio
 import logging
 import time
+from collections import OrderedDict
 from typing import Any, Optional, Union
 
 import requests  # type: ignore
 
+from ..output_utils import split_lines, strip_ansi
 from .base import BaseTool
 
 logger = logging.getLogger(__name__)
@@ -18,6 +20,17 @@ logger = logging.getLogger(__name__)
 
 class TaskTools(BaseTool):
     """Tools for working with Semaphore tasks."""
+
+    # Bounded log-access policy
+    MAX_LINES_CAP = 2000
+    DEFAULT_MAX_LINES = 200
+    MAX_FAILURE_BLOCKS = 10
+    LINES_PER_BLOCK = 20
+    RAW_OUTPUT_DEFAULT_MAX_BYTES = 50_000
+
+    # Completed-task output cache. Terminal output is immutable, so no TTL.
+    OUTPUT_CACHE_MAXSIZE = 8
+    _TERMINAL_STATUSES = {"success", "successful", "error", "failed", "stopped"}
 
     # Status mapping for user-friendly names
     STATUS_MAPPING = {
@@ -27,6 +40,83 @@ class TaskTools(BaseTool):
         "waiting": "waiting",
         "stopped": "stopped",  # May need to verify this mapping
     }
+
+    def __init__(self, semaphore_client):
+        super().__init__(semaphore_client)
+        self._output_cache: OrderedDict[
+            tuple[int, int, str], tuple[list[str], Optional[list], Optional[list], int]
+        ] = OrderedDict()
+
+    def _cache_get(
+        self, key: tuple[int, int, str]
+    ) -> Optional[tuple[list[str], Optional[list], Optional[list], int]]:
+        if key in self._output_cache:
+            self._output_cache.move_to_end(key)
+            return self._output_cache[key]
+        return None
+
+    def _cache_put(
+        self,
+        key: tuple[int, int, str],
+        value: tuple[list[str], Optional[list], Optional[list], int],
+    ) -> None:
+        self._output_cache[key] = value
+        self._output_cache.move_to_end(key)
+        while len(self._output_cache) > self.OUTPUT_CACHE_MAXSIZE:
+            self._output_cache.popitem(last=False)
+
+    def _load_lines(
+        self,
+        project_id: int,
+        task_id: int,
+        structured: bool = False,
+        status: Optional[str] = None,
+    ) -> tuple[list[str], Optional[list], Optional[list], int]:
+        """Fetch and normalize task output to lines plus optional metadata.
+
+        Raw output is the default source. structured=True uses the /output
+        endpoint for per-line timestamps and stage IDs. Completed-task output is
+        cached; running task output is always re-fetched.
+        """
+        source = "structured" if structured else "raw"
+        key = (project_id, task_id, source)
+        cached = self._cache_get(key)
+        if cached is not None:
+            return cached
+
+        if status is None:
+            try:
+                status = self.semaphore.get_task(project_id, task_id).get("status")
+            except Exception as e:
+                logger.warning(
+                    f"Could not fetch status for cache decision (task {task_id}): {e}"
+                )
+
+        if structured:
+            records = self.semaphore.get_task_output(project_id, task_id)
+            lines: list[str] = []
+            structured_times: list[Any] = []
+            structured_stages: list[Any] = []
+            for record in records:
+                record_output = strip_ansi(record.get("output") or "")
+                record_lines = record_output.split("\n")
+                lines.extend(record_lines)
+                structured_times.extend([record.get("time")] * len(record_lines))
+                structured_stages.extend([record.get("stage_id")] * len(record_lines))
+            times: Optional[list] = structured_times
+            stages: Optional[list] = structured_stages
+            total_bytes = sum(len(line.encode("utf-8")) for line in lines)
+        else:
+            raw = self.semaphore.get_task_raw_output(project_id, task_id)
+            lines = [strip_ansi(line) for line in split_lines(raw)]
+            times = None
+            stages = None
+            total_bytes = len(raw.encode("utf-8"))
+
+        value = (lines, times, stages, total_bytes)
+        if status in self._TERMINAL_STATUSES:
+            self._cache_put(key, value)
+        return value
 
     def _build_task_url(self, project_id: int, task_id: int) -> str:
         """Build a web URL for viewing a task in SemaphoreUI.
