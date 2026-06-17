@@ -271,8 +271,8 @@ The `conftest.py` provides these fixtures:
 
 ### MCP Inspector not found
 ```bash
-# Install Node.js 18+ and verify npx works
-npx @modelcontextprotocol/inspector --version
+# Install Node.js 18+ and verify the inspector package resolves
+npm exec --yes --package @modelcontextprotocol/inspector -- mcp-inspector --help
 ```
 
 ### Container not starting
