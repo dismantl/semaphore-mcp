@@ -17,6 +17,7 @@ from ..output_utils import (
     FAILURE_RE,
     clamp,
     extract_blocks,
+    extract_recap,
     search,
     split_lines,
     strip_ansi,
@@ -1083,6 +1084,117 @@ class TaskTools(BaseTool):
             return result
         except Exception as e:
             self.handle_error(e, f"getting output window for task {task_id}")
+
+    def _build_output_excerpt(
+        self, lines: list[str], total_bytes: int
+    ) -> dict[str, Any]:
+        """Build bounded failure-triage output from already-fetched lines."""
+        blocks, fatal_count = extract_blocks(
+            lines, FAILURE_RE, self.MAX_FAILURE_BLOCKS, self.LINES_PER_BLOCK
+        )
+        recap = extract_recap(lines)
+        tail = window(lines, "tail", 20)["lines"]
+        first_failure_line = blocks[0]["line_range"][0] if blocks else None
+        matched_text = "\n".join(
+            [line for block in blocks for line in block["lines"]] + recap
+        )
+
+        return {
+            "total_lines": len(lines),
+            "total_bytes": total_bytes,
+            "fatal_count": fatal_count,
+            "first_failure_line": first_failure_line,
+            "blocks": blocks,
+            "blocks_truncated": fatal_count > len(blocks),
+            "recap": recap,
+            "tail": tail,
+            "matched_text": matched_text,
+        }
+
+    def _gather_task_context(self, project_id: int, task_id: int) -> dict[str, Any]:
+        """Gather task/template/project metadata for triage and analysis."""
+        task = self.semaphore.get_task(project_id, task_id)
+        template_id = task.get("template_id") or task.get("template", {}).get("id")
+
+        template_context = None
+        if template_id:
+            try:
+                template_context = self.semaphore.get_template(project_id, template_id)
+            except Exception as e:
+                logger.warning(f"Could not fetch template {template_id}: {str(e)}")
+
+        project_context = None
+        try:
+            projects = self.semaphore.list_projects()
+            project_list = (
+                projects if isinstance(projects, list) else projects.get("projects", [])
+            )
+            project_context = next(
+                (
+                    project
+                    for project in project_list
+                    if project.get("id") == project_id
+                ),
+                None,
+            )
+        except Exception as e:
+            logger.warning(f"Could not fetch project context: {str(e)}")
+
+        return {
+            "task_details": {
+                "id": task_id,
+                "status": task.get("status"),
+                "created": task.get("created"),
+                "started": task.get("started"),
+                "ended": task.get("ended"),
+                "message": task.get("message"),
+                "template_id": template_id,
+            },
+            "project_context": {
+                "id": project_id,
+                "name": project_context.get("name") if project_context else None,
+                "repository": project_context.get("repository")
+                if project_context
+                else None,
+            },
+            "template_context": {
+                "id": template_id,
+                "name": template_context.get("name") if template_context else None,
+                "playbook": template_context.get("playbook")
+                if template_context
+                else None,
+            }
+            if template_context
+            else None,
+        }
+
+    async def get_task_output_summary(
+        self, project_id: int, task_id: int
+    ) -> dict[str, Any]:
+        """Return bounded task-output triage plus task/template/project context."""
+        try:
+            context = self._gather_task_context(project_id, task_id)
+            status = context["task_details"]["status"]
+            lines, _times, _stages, total_bytes = self._load_lines(
+                project_id, task_id, status=status
+            )
+            excerpt = self._build_output_excerpt(lines, total_bytes)
+            return {
+                **context,
+                "failures": {
+                    "fatal_count": excerpt["fatal_count"],
+                    "first_failure_line": excerpt["first_failure_line"],
+                    "blocks": excerpt["blocks"],
+                    "blocks_truncated": excerpt["blocks_truncated"],
+                },
+                "recap": excerpt["recap"],
+                "tail": excerpt["tail"],
+                "total_lines": excerpt["total_lines"],
+                "total_bytes": excerpt["total_bytes"],
+                "more": "Use get_task_output(mode='range'|'search') to read other regions.",
+            }
+        except Exception as e:
+            self.handle_error(e, f"summarizing output for task {task_id}")
 
     async def analyze_task_failure(
         self, project_id: int, task_id: int

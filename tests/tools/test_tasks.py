@@ -891,6 +891,49 @@ class TestTaskTools:
         assert "error" in result
 
     @pytest.mark.asyncio
+    async def test_get_task_output_summary(self, task_tools):
+        """Test get_task_output_summary returns bounded triage context."""
+        task = {
+            "id": 42,
+            "status": "error",
+            "created": "t0",
+            "started": "t1",
+            "ended": "t2",
+            "template_id": 5,
+            "message": "m",
+        }
+        task_tools.semaphore.get_task.return_value = task
+        task_tools.semaphore.get_template.return_value = {"id": 5, "name": "Deploy"}
+        task_tools.semaphore.list_projects.return_value = [{"id": 1, "name": "ACAB"}]
+        task_tools.semaphore.get_task_raw_output.return_value = SAMPLE_LOG
+
+        result = await task_tools.get_task_output_summary(1, 42)
+
+        assert result["task_details"]["id"] == 42
+        assert result["project_context"]["name"] == "ACAB"
+        assert result["template_context"]["name"] == "Deploy"
+        assert result["failures"]["fatal_count"] == 1
+        assert result["failures"]["blocks"][0]["host"] == "hostB"
+        assert result["recap"][0].startswith("PLAY RECAP")
+        assert "raw" not in result
+
+    @pytest.mark.asyncio
+    async def test_summary_handles_no_failures(self, task_tools):
+        """Test output summary handles successful logs without failure blocks."""
+        task = {"id": 7, "status": "success", "template_id": 5}
+        task_tools.semaphore.get_task.return_value = task
+        task_tools.semaphore.get_template.return_value = {"id": 5, "name": "Deploy"}
+        task_tools.semaphore.list_projects.return_value = [{"id": 1, "name": "ACAB"}]
+        task_tools.semaphore.get_task_raw_output.return_value = (
+            "TASK [x] ***\nok: [h]\n"
+        )
+
+        result = await task_tools.get_task_output_summary(1, 7)
+
+        assert result["failures"]["fatal_count"] == 0
+        assert result["failures"]["first_failure_line"] is None
+
+    @pytest.mark.asyncio
     async def test_analyze_task_failure(self, task_tools):
         """Test analyze_task_failure method for a failed task."""
         project_id = 1
