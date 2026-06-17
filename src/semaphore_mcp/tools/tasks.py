@@ -1008,7 +1008,8 @@ class TaskTools(BaseTool):
         """
         try:
             raw = self.semaphore.get_task_raw_output(project_id, task_id)
-            max_bytes = max(0, max_bytes)
+            if max_bytes < 0:
+                max_bytes = self.RAW_OUTPUT_DEFAULT_MAX_BYTES
             encoded = raw.encode("utf-8")
             total = len(encoded)
             if max_bytes and total > max_bytes:
@@ -1065,7 +1066,24 @@ class TaskTools(BaseTool):
                 project_id, task_id, structured=structured
             )
 
-            if stage_id is not None and stages is not None:
+            if stage_id is not None:
+                if stages is None or all(stage is None for stage in stages):
+                    return {
+                        "error": (
+                            "stage_id filtering requested, but this Semaphore "
+                            "/output response does not include stage_id metadata."
+                        ),
+                        "hint": (
+                            "Use include_timestamps=true without stage_id, or retry "
+                            "stage filtering only against Semaphore output records "
+                            "that expose stage_id."
+                        ),
+                        "task_id": task_id,
+                        "mode": mode,
+                        "requested_stage_id": stage_id,
+                        "total_lines": len(lines),
+                        "total_bytes": total_bytes,
+                    }
                 keep = [i for i, stage in enumerate(stages) if stage == stage_id]
                 lines = [lines[i] for i in keep]
                 times = [times[i] for i in keep] if times is not None else None
@@ -1176,6 +1194,8 @@ class TaskTools(BaseTool):
                 "ended": task.get("ended"),
                 "message": task.get("message"),
                 "template_id": template_id,
+                "debug": task.get("debug"),
+                "environment": task.get("environment"),
             },
             "project_context": {
                 "id": project_id,
@@ -1188,6 +1208,12 @@ class TaskTools(BaseTool):
                 "id": template_id,
                 "name": template_context.get("name") if template_context else None,
                 "playbook": template_context.get("playbook")
+                if template_context
+                else None,
+                "arguments": template_context.get("arguments")
+                if template_context
+                else None,
+                "description": template_context.get("description")
                 if template_context
                 else None,
             }

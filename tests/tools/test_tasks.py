@@ -708,6 +708,21 @@ class TestTaskTools:
         assert result["text"] == big
 
     @pytest.mark.asyncio
+    async def test_get_task_raw_output_negative_max_bytes_uses_default_cap(
+        self, task_tools
+    ):
+        """Test negative max_bytes values do not request the full raw output."""
+        default_cap = task_tools.RAW_OUTPUT_DEFAULT_MAX_BYTES
+        big = "Z" * (default_cap + 20)
+        task_tools.semaphore.get_task_raw_output.return_value = big
+
+        result = await task_tools.get_task_raw_output(1, 42, max_bytes=-1)
+
+        assert result["truncated"] is True
+        assert result["returned_bytes"] <= default_cap
+        assert result["text"] == "Z" * default_cap
+
+    @pytest.mark.asyncio
     async def test_get_task_raw_output_error(self, task_tools):
         """Test get_task_raw_output method with error."""
         # Set up the mock to raise an exception
@@ -918,6 +933,24 @@ class TestTaskTools:
         ]
 
     @pytest.mark.asyncio
+    async def test_get_task_output_stage_filter_requires_stage_metadata(
+        self, task_tools
+    ):
+        """Test stage filtering fails clearly when /output lacks stage metadata."""
+        task_tools.semaphore.get_task.return_value = {"status": "error"}
+        task_tools.semaphore.get_task_output.return_value = [
+            {"output": "aaaa", "time": "t0"},
+            {"output": "bbbb", "time": "t1"},
+        ]
+
+        result = await task_tools.get_task_output(1, 42, mode="head", stage_id=2)
+
+        assert "error" in result
+        assert "stage_id" in result["error"]
+        assert result["total_lines"] == 2
+        assert result["total_bytes"] == 8
+
+    @pytest.mark.asyncio
     async def test_get_task_output_unknown_mode(self, task_tools):
         """Test unknown mode returns a bounded error response."""
         task_tools.semaphore.get_task.return_value = {"status": "error"}
@@ -987,6 +1020,7 @@ class TestTaskTools:
             "message": "Task failed",
             "template_id": template_id,
             "environment": {"VAR": "value"},
+            "debug": True,
         }
 
         # Mock template context
@@ -1021,12 +1055,16 @@ class TestTaskTools:
         assert result["task_details"]["id"] == task_id
         assert result["task_details"]["status"] == "error"
         assert result["task_details"]["template_id"] == template_id
+        assert result["task_details"]["debug"] is True
+        assert result["task_details"]["environment"] == {"VAR": "value"}
 
         assert result["project_context"]["id"] == project_id
         assert result["project_context"]["name"] == "Test Project"
 
         assert result["template_context"]["id"] == template_id
         assert result["template_context"]["name"] == "Test Template"
+        assert result["template_context"]["arguments"] == "--check"
+        assert result["template_context"]["description"] == "Test playbook"
 
         assert "raw" not in result["outputs"]
         assert result["outputs"]["excerpt"]["fatal_count"] == 1

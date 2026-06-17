@@ -161,7 +161,7 @@ Once connected, you can interact with SemaphoreUI through natural conversation:
 
 Use `get_task_output_summary` first when a task failed. It returns bounded failure blocks, the play recap, tail output, and task/template/project context without inlining the full log.
 
-Use `get_task_output` to page or search task output. It supports `tail`, `head`, `range`, `search`, `failed`, and `changed` modes. Set `include_timestamps=true` or `stage_id=<id>` when you need structured `/output` metadata or a per-stage view.
+Use `get_task_output` to page or search task output. It supports `tail`, `head`, `range`, `search`, `failed`, and `changed` modes. Set `include_timestamps=true` when you need structured `/output` metadata. `stage_id=<id>` provides a per-stage view only when the Semaphore `/output` response includes stage metadata; otherwise the tool returns a clear error instead of an empty log.
 
 `get_task_raw_output` is bounded by default and returns a tail excerpt with truncation metadata. Pass `max_bytes=0` only when the client really needs the full raw blob. Completed-task output is cached server-side for windowed and summary reads; running tasks are always fetched fresh.
 
