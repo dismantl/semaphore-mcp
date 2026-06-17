@@ -974,13 +974,15 @@ class TestTaskTools:
         }
         task_tools.semaphore.get_task.return_value = task
         task_tools.semaphore.get_template.return_value = {"id": 5, "name": "Deploy"}
-        task_tools.semaphore.list_projects.return_value = [{"id": 1, "name": "ACAB"}]
+        task_tools.semaphore.list_projects.return_value = [
+            {"id": 1, "name": "Test Project"}
+        ]
         task_tools.semaphore.get_task_raw_output.return_value = SAMPLE_LOG
 
         result = await task_tools.get_task_output_summary(1, 42)
 
         assert result["task_details"]["id"] == 42
-        assert result["project_context"]["name"] == "ACAB"
+        assert result["project_context"]["name"] == "Test Project"
         assert result["template_context"]["name"] == "Deploy"
         assert result["failures"]["fatal_count"] == 1
         assert result["failures"]["blocks"][0]["host"] == "hostB"
@@ -993,7 +995,9 @@ class TestTaskTools:
         task = {"id": 7, "status": "success", "template_id": 5}
         task_tools.semaphore.get_task.return_value = task
         task_tools.semaphore.get_template.return_value = {"id": 5, "name": "Deploy"}
-        task_tools.semaphore.list_projects.return_value = [{"id": 1, "name": "ACAB"}]
+        task_tools.semaphore.list_projects.return_value = [
+            {"id": 1, "name": "Test Project"}
+        ]
         task_tools.semaphore.get_task_raw_output.return_value = (
             "TASK [x] ***\nok: [h]\n"
         )
