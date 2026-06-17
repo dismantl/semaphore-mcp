@@ -7,6 +7,17 @@ from unittest.mock import AsyncMock, MagicMock, Mock
 import pytest
 import requests
 
+SAMPLE_LOG = "\n".join(
+    [
+        "PLAY [all] ***",
+        "TASK [web : deploy] ***",
+        "ok: [hostA]",
+        'fatal: [hostB]: FAILED! => {"msg": "boom"}',
+        "PLAY RECAP ***",
+        "hostB : ok=1 changed=0 failed=1",
+    ]
+)
+
 
 class TestTaskTools:
     """Test suite for TaskTools class methods."""
@@ -654,10 +665,62 @@ class TestTaskTools:
         result = await task_tools.get_task_raw_output(project_id, task_id)
 
         # Verify the result
-        assert result == mock_raw_output
+        assert result["text"] == mock_raw_output
+        assert result["total_bytes"] == len(mock_raw_output.encode("utf-8"))
+        assert result["returned_bytes"] == len(mock_raw_output.encode("utf-8"))
+        assert result["truncated"] is False
         task_tools.semaphore.get_task_raw_output.assert_called_once_with(
             project_id, task_id
         )
+
+    @pytest.mark.asyncio
+    async def test_get_task_raw_output_small_not_truncated(self, task_tools):
+        """Test short raw output is not truncated."""
+        task_tools.semaphore.get_task_raw_output.return_value = "short output"
+
+        result = await task_tools.get_task_raw_output(1, 42)
+
+        assert result["text"] == "short output"
+        assert result["truncated"] is False
+
+    @pytest.mark.asyncio
+    async def test_get_task_raw_output_truncates_to_tail(self, task_tools):
+        """Test raw output truncation keeps the tail."""
+        big = "X" * 100 + "TAILMARKER"
+        task_tools.semaphore.get_task_raw_output.return_value = big
+
+        result = await task_tools.get_task_raw_output(1, 42, max_bytes=20)
+
+        assert result["truncated"] is True
+        assert result["text"].endswith("TAILMARKER")
+        assert result["returned_bytes"] <= 20
+        assert "get_task_output" in result["hint"]
+
+    @pytest.mark.asyncio
+    async def test_get_task_raw_output_max_bytes_zero_returns_all(self, task_tools):
+        """Test max_bytes=0 returns the full raw output."""
+        big = "Y" * 100
+        task_tools.semaphore.get_task_raw_output.return_value = big
+
+        result = await task_tools.get_task_raw_output(1, 42, max_bytes=0)
+
+        assert result["truncated"] is False
+        assert result["text"] == big
+
+    @pytest.mark.asyncio
+    async def test_get_task_raw_output_negative_max_bytes_uses_default_cap(
+        self, task_tools
+    ):
+        """Test negative max_bytes values do not request the full raw output."""
+        default_cap = task_tools.RAW_OUTPUT_DEFAULT_MAX_BYTES
+        big = "Z" * (default_cap + 20)
+        task_tools.semaphore.get_task_raw_output.return_value = big
+
+        result = await task_tools.get_task_raw_output(1, 42, max_bytes=-1)
+
+        assert result["truncated"] is True
+        assert result["returned_bytes"] <= default_cap
+        assert result["text"] == "Z" * default_cap
 
     @pytest.mark.asyncio
     async def test_get_task_raw_output_error(self, task_tools):
@@ -675,8 +738,278 @@ class TestTaskTools:
         assert "Error during getting raw output for task" in str(excinfo.value)
 
     @pytest.mark.asyncio
-    async def test_analyze_task_failure(self, task_tools):
-        """Test analyze_task_failure method for a failed task."""
+    async def test_load_lines_raw_default(self, task_tools):
+        """Test _load_lines defaults to raw output."""
+        task_tools.semaphore.get_task.return_value = {"status": "success"}
+        task_tools.semaphore.get_task_raw_output.return_value = "a\nb\nc"
+
+        lines, times, stages, total_bytes = task_tools._load_lines(1, 42)
+
+        assert lines == ["a", "b", "c"]
+        assert times is None
+        assert stages is None
+        assert total_bytes == 5
+
+    @pytest.mark.asyncio
+    async def test_load_lines_structured(self, task_tools):
+        """Test _load_lines can normalize structured output records."""
+        task_tools.semaphore.get_task.return_value = {"status": "success"}
+        task_tools.semaphore.get_task_output.return_value = [
+            {"output": "a", "time": "t0", "stage_id": 1},
+            {"output": "b", "time": "t1", "stage_id": 2},
+        ]
+
+        lines, times, stages, _ = task_tools._load_lines(1, 42, structured=True)
+
+        assert lines == ["a", "b"]
+        assert times == ["t0", "t1"]
+        assert stages == [1, 2]
+
+    @pytest.mark.asyncio
+    async def test_load_lines_strips_structured_ansi(self, task_tools):
+        """Test structured output ANSI is stripped at normalization time."""
+        task_tools.semaphore.get_task.return_value = {"status": "success"}
+        task_tools.semaphore.get_task_output.return_value = [
+            {"output": "\x1b[31mfatal:\x1b[0m boom", "time": "t0", "stage_id": 1}
+        ]
+
+        lines, _, _, _ = task_tools._load_lines(1, 42, structured=True)
+
+        assert lines == ["fatal: boom"]
+
+    @pytest.mark.asyncio
+    async def test_load_lines_expands_structured_embedded_newlines(self, task_tools):
+        """Test embedded newlines in structured records become line entries."""
+        task_tools.semaphore.get_task.return_value = {"status": "success"}
+        task_tools.semaphore.get_task_output.return_value = [
+            {"output": "a\nb", "time": "t0", "stage_id": 1},
+            {"output": "c", "time": "t1", "stage_id": 2},
+        ]
+
+        lines, times, stages, _ = task_tools._load_lines(1, 42, structured=True)
+
+        assert lines == ["a", "b", "c"]
+        assert times == ["t0", "t0", "t1"]
+        assert stages == [1, 1, 2]
+
+    @pytest.mark.asyncio
+    async def test_load_lines_preserves_structured_empty_records(self, task_tools):
+        """Test empty structured output records remain blank log lines."""
+        task_tools.semaphore.get_task.return_value = {"status": "success"}
+        task_tools.semaphore.get_task_output.return_value = [
+            {"output": "", "time": "t0", "stage_id": 1},
+            {"output": "after", "time": "t1", "stage_id": 1},
+        ]
+
+        lines, times, stages, _ = task_tools._load_lines(1, 42, structured=True)
+
+        assert lines == ["", "after"]
+        assert times == ["t0", "t1"]
+        assert stages == [1, 1]
+
+    @pytest.mark.asyncio
+    async def test_load_lines_caches_completed_task(self, task_tools):
+        """Test completed task output is cached."""
+        task_tools.semaphore.get_task.return_value = {"status": "success"}
+        task_tools.semaphore.get_task_raw_output.return_value = "a\nb"
+
+        task_tools._load_lines(1, 42)
+        task_tools._load_lines(1, 42)
+
+        assert task_tools.semaphore.get_task_raw_output.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_load_lines_does_not_cache_running_task(self, task_tools):
+        """Test running task output is not cached."""
+        task_tools.semaphore.get_task.return_value = {"status": "running"}
+        task_tools.semaphore.get_task_raw_output.return_value = "a\nb"
+
+        task_tools._load_lines(1, 42)
+        task_tools._load_lines(1, 42)
+
+        assert task_tools.semaphore.get_task_raw_output.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_load_lines_status_passed_skips_get_task(self, task_tools):
+        """Test known status skips the task status lookup."""
+        task_tools.semaphore.get_task_raw_output.return_value = "a"
+
+        task_tools._load_lines(1, 42, status="success")
+
+        task_tools.semaphore.get_task.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_output_cache_evicts_lru(self, task_tools):
+        """Test output cache keeps only the configured LRU size."""
+        task_tools.semaphore.get_task.return_value = {"status": "success"}
+        task_tools.semaphore.get_task_raw_output.return_value = "x"
+
+        for task_id in range(task_tools.OUTPUT_CACHE_MAXSIZE + 2):
+            task_tools._load_lines(1, task_id)
+
+        assert len(task_tools._output_cache) == task_tools.OUTPUT_CACHE_MAXSIZE
+
+    @pytest.mark.asyncio
+    async def test_get_task_output_tail_default(self, task_tools):
+        """Test get_task_output defaults to bounded tail mode."""
+        task_tools.semaphore.get_task.return_value = {"status": "error"}
+        task_tools.semaphore.get_task_raw_output.return_value = SAMPLE_LOG
+
+        result = await task_tools.get_task_output(1, 42)
+
+        assert result["mode"] == "tail"
+        assert result["total_lines"] == 6
+        assert result["lines"][-1].startswith("hostB :")
+        assert result["truncated"] is False
+
+    @pytest.mark.asyncio
+    async def test_get_task_output_search(self, task_tools):
+        """Test get_task_output search mode."""
+        task_tools.semaphore.get_task.return_value = {"status": "error"}
+        task_tools.semaphore.get_task_raw_output.return_value = SAMPLE_LOG
+
+        result = await task_tools.get_task_output(
+            1, 42, mode="search", pattern="fatal:"
+        )
+
+        assert result["match_count"] == 1
+        assert any(e["is_match"] for e in result["entries"])
+
+    @pytest.mark.asyncio
+    async def test_get_task_output_search_requires_pattern(self, task_tools):
+        """Test search mode requires a pattern."""
+        task_tools.semaphore.get_task.return_value = {"status": "error"}
+        task_tools.semaphore.get_task_raw_output.return_value = SAMPLE_LOG
+
+        result = await task_tools.get_task_output(1, 42, mode="search")
+
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_get_task_output_failed_mode(self, task_tools):
+        """Test failed mode extracts failed task blocks."""
+        task_tools.semaphore.get_task.return_value = {"status": "error"}
+        task_tools.semaphore.get_task_raw_output.return_value = SAMPLE_LOG
+
+        result = await task_tools.get_task_output(1, 42, mode="failed")
+
+        assert result["fatal_count"] == 1
+        assert result["blocks"][0]["host"] == "hostB"
+
+    @pytest.mark.asyncio
+    async def test_get_task_output_timestamps_use_structured(self, task_tools):
+        """Test timestamped reads use structured output records."""
+        task_tools.semaphore.get_task.return_value = {"status": "error"}
+        task_tools.semaphore.get_task_output.return_value = [
+            {"output": "line0", "time": "t0", "stage_id": 1},
+            {"output": "line1", "time": "t1", "stage_id": 2},
+        ]
+
+        result = await task_tools.get_task_output(
+            1, 42, mode="tail", include_timestamps=True
+        )
+
+        assert result["lines"][-1] == {"time": "t1", "text": "line1"}
+
+    @pytest.mark.asyncio
+    async def test_get_task_output_stage_filter_recomputes_totals(self, task_tools):
+        """Test stage filtering recomputes totals for the filtered list."""
+        task_tools.semaphore.get_task.return_value = {"status": "error"}
+        task_tools.semaphore.get_task_output.return_value = [
+            {"output": "aaaa", "time": "t0", "stage_id": 1},
+            {"output": "bbbb", "time": "t1", "stage_id": 2},
+            {"output": "cccc", "time": "t2", "stage_id": 2},
+        ]
+
+        result = await task_tools.get_task_output(1, 42, mode="head", stage_id=2)
+
+        assert result["total_lines"] == 2
+        assert result["total_bytes"] == 8
+        assert [
+            li if isinstance(li, str) else li["text"] for li in result["lines"]
+        ] == [
+            "bbbb",
+            "cccc",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_get_task_output_stage_filter_requires_stage_metadata(
+        self, task_tools
+    ):
+        """Test stage filtering fails clearly when /output lacks stage metadata."""
+        task_tools.semaphore.get_task.return_value = {"status": "error"}
+        task_tools.semaphore.get_task_output.return_value = [
+            {"output": "aaaa", "time": "t0"},
+            {"output": "bbbb", "time": "t1"},
+        ]
+
+        result = await task_tools.get_task_output(1, 42, mode="head", stage_id=2)
+
+        assert "error" in result
+        assert "stage_id" in result["error"]
+        assert result["total_lines"] == 2
+        assert result["total_bytes"] == 8
+
+    @pytest.mark.asyncio
+    async def test_get_task_output_unknown_mode(self, task_tools):
+        """Test unknown mode returns a bounded error response."""
+        task_tools.semaphore.get_task.return_value = {"status": "error"}
+        task_tools.semaphore.get_task_raw_output.return_value = SAMPLE_LOG
+
+        result = await task_tools.get_task_output(1, 42, mode="bogus")
+
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_get_task_output_summary(self, task_tools):
+        """Test get_task_output_summary returns bounded triage context."""
+        task = {
+            "id": 42,
+            "status": "error",
+            "created": "t0",
+            "started": "t1",
+            "ended": "t2",
+            "template_id": 5,
+            "message": "m",
+        }
+        task_tools.semaphore.get_task.return_value = task
+        task_tools.semaphore.get_template.return_value = {"id": 5, "name": "Deploy"}
+        task_tools.semaphore.list_projects.return_value = [
+            {"id": 1, "name": "Test Project"}
+        ]
+        task_tools.semaphore.get_task_raw_output.return_value = SAMPLE_LOG
+
+        result = await task_tools.get_task_output_summary(1, 42)
+
+        assert result["task_details"]["id"] == 42
+        assert result["project_context"]["name"] == "Test Project"
+        assert result["template_context"]["name"] == "Deploy"
+        assert result["failures"]["fatal_count"] == 1
+        assert result["failures"]["blocks"][0]["host"] == "hostB"
+        assert result["recap"][0].startswith("PLAY RECAP")
+        assert "raw" not in result
+
+    @pytest.mark.asyncio
+    async def test_summary_handles_no_failures(self, task_tools):
+        """Test output summary handles successful logs without failure blocks."""
+        task = {"id": 7, "status": "success", "template_id": 5}
+        task_tools.semaphore.get_task.return_value = task
+        task_tools.semaphore.get_template.return_value = {"id": 5, "name": "Deploy"}
+        task_tools.semaphore.list_projects.return_value = [
+            {"id": 1, "name": "Test Project"}
+        ]
+        task_tools.semaphore.get_task_raw_output.return_value = (
+            "TASK [x] ***\nok: [h]\n"
+        )
+
+        result = await task_tools.get_task_output_summary(1, 7)
+
+        assert result["failures"]["fatal_count"] == 0
+        assert result["failures"]["first_failure_line"] is None
+
+    @pytest.mark.asyncio
+    async def test_analyze_task_failure_is_bounded(self, task_tools):
+        """Test analyze_task_failure returns a bounded excerpt, not raw output."""
         project_id = 1
         task_id = 42
         template_id = 5
@@ -691,6 +1024,7 @@ class TestTaskTools:
             "message": "Task failed",
             "template_id": template_id,
             "environment": {"VAR": "value"},
+            "debug": True,
         }
 
         # Mock template context
@@ -711,14 +1045,11 @@ class TestTaskTools:
             }
         ]
 
-        # Mock outputs
-        mock_raw_output = "TASK [test] failed: host unreachable"
-
         # Set up mocks
         task_tools.semaphore.get_task.return_value = mock_task
         task_tools.semaphore.get_template.return_value = mock_template
         task_tools.semaphore.list_projects.return_value = mock_projects
-        task_tools.semaphore.get_task_raw_output.return_value = mock_raw_output
+        task_tools.semaphore.get_task_raw_output.return_value = SAMPLE_LOG
 
         # Call the method
         result = await task_tools.analyze_task_failure(project_id, task_id)
@@ -728,15 +1059,21 @@ class TestTaskTools:
         assert result["task_details"]["id"] == task_id
         assert result["task_details"]["status"] == "error"
         assert result["task_details"]["template_id"] == template_id
+        assert result["task_details"]["debug"] is True
+        assert result["task_details"]["environment"] == {"VAR": "value"}
 
         assert result["project_context"]["id"] == project_id
         assert result["project_context"]["name"] == "Test Project"
 
         assert result["template_context"]["id"] == template_id
         assert result["template_context"]["name"] == "Test Template"
+        assert result["template_context"]["arguments"] == "--check"
+        assert result["template_context"]["description"] == "Test playbook"
 
-        assert result["outputs"]["raw"] == mock_raw_output
-        assert result["outputs"]["has_raw_output"] is True
+        assert "raw" not in result["outputs"]
+        assert result["outputs"]["excerpt"]["fatal_count"] == 1
+        assert result["outputs"]["has_output"] is True
+        assert result.get("deprecated")
 
         # Verify analysis guidance is included
         assert "analysis_guidance" in result
@@ -783,17 +1120,17 @@ class TestTaskTools:
         mock_analysis_1 = {
             "analysis_ready": True,
             "template_context": {"name": "Template A"},
-            "outputs": {"raw": "connection timeout error"},
+            "outputs": {"excerpt": {"matched_text": "connection timeout error"}},
         }
         mock_analysis_2 = {
             "analysis_ready": True,
             "template_context": {"name": "Template A"},
-            "outputs": {"raw": "authentication failed"},
+            "outputs": {"excerpt": {"matched_text": "authentication failed"}},
         }
         mock_analysis_3 = {
             "analysis_ready": True,
             "template_context": {"name": "Template B"},
-            "outputs": {"raw": "syntax error in playbook"},
+            "outputs": {"excerpt": {"matched_text": "syntax error in playbook"}},
         }
 
         # Set up mocks
@@ -846,6 +1183,9 @@ class TestTaskTools:
         assert "message" in result
         assert "No failed tasks found" in result["message"]
         assert result["failed_task_count"] == 0
+        task_tools.filter_tasks.assert_called_once_with(
+            project_id, status=["failed"], limit=5
+        )
 
 
 class TestTaskToolsEdgeCases:

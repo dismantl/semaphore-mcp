@@ -28,6 +28,19 @@ def test_client_connection(semaphore_client):
     assert isinstance(projects, list)
 
 
+def test_get_task_output_returns_records(mock_http_response):
+    """Test structured task output endpoint returns per-line records."""
+    from semaphore_mcp.api import SemaphoreAPIClient
+
+    client = SemaphoreAPIClient("http://x", token="t")
+    records = [{"id": 0, "task_id": 9, "time": "t0", "output": "hi", "stage_id": None}]
+    client.session.request = lambda *a, **k: mock_http_response(
+        json_data=records, content=b"[]"
+    )
+
+    assert client.get_task_output(1, 9) == records
+
+
 def test_project_operations(semaphore_client):
     """Test project-related operations."""
     # List projects (should return at least an empty list)

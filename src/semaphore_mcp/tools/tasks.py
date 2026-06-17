@@ -7,10 +7,22 @@ This module provides tools for interacting with Semaphore tasks.
 import asyncio
 import logging
 import time
+from collections import OrderedDict
 from typing import Any, Optional, Union
 
 import requests  # type: ignore
 
+from ..output_utils import (
+    CHANGED_RE,
+    FAILURE_RE,
+    clamp,
+    extract_blocks,
+    extract_recap,
+    search,
+    split_lines,
+    strip_ansi,
+    window,
+)
 from .base import BaseTool
 
 logger = logging.getLogger(__name__)
@@ -18,6 +30,17 @@ logger = logging.getLogger(__name__)
 
 class TaskTools(BaseTool):
     """Tools for working with Semaphore tasks."""
+
+    # Bounded log-access policy
+    MAX_LINES_CAP = 2000
+    DEFAULT_MAX_LINES = 200
+    MAX_FAILURE_BLOCKS = 10
+    LINES_PER_BLOCK = 20
+    RAW_OUTPUT_DEFAULT_MAX_BYTES = 50_000
+
+    # Completed-task output cache. Terminal output is immutable, so no TTL.
+    OUTPUT_CACHE_MAXSIZE = 8
+    _TERMINAL_STATUSES = {"success", "successful", "error", "failed", "stopped"}
 
     # Status mapping for user-friendly names
     STATUS_MAPPING = {
@@ -27,6 +50,83 @@ class TaskTools(BaseTool):
         "waiting": "waiting",
         "stopped": "stopped",  # May need to verify this mapping
     }
+
+    def __init__(self, semaphore_client):
+        super().__init__(semaphore_client)
+        self._output_cache: OrderedDict[
+            tuple[int, int, str], tuple[list[str], Optional[list], Optional[list], int]
+        ] = OrderedDict()
+
+    def _cache_get(
+        self, key: tuple[int, int, str]
+    ) -> Optional[tuple[list[str], Optional[list], Optional[list], int]]:
+        if key in self._output_cache:
+            self._output_cache.move_to_end(key)
+            return self._output_cache[key]
+        return None
+
+    def _cache_put(
+        self,
+        key: tuple[int, int, str],
+        value: tuple[list[str], Optional[list], Optional[list], int],
+    ) -> None:
+        self._output_cache[key] = value
+        self._output_cache.move_to_end(key)
+        while len(self._output_cache) > self.OUTPUT_CACHE_MAXSIZE:
+            self._output_cache.popitem(last=False)
+
+    def _load_lines(
+        self,
+        project_id: int,
+        task_id: int,
+        structured: bool = False,
+        status: Optional[str] = None,
+    ) -> tuple[list[str], Optional[list], Optional[list], int]:
+        """Fetch and normalize task output to lines plus optional metadata.
+
+        Raw output is the default source. structured=True uses the /output
+        endpoint for per-line timestamps and stage IDs. Completed-task output is
+        cached; running task output is always re-fetched.
+        """
+        source = "structured" if structured else "raw"
+        key = (project_id, task_id, source)
+        cached = self._cache_get(key)
+        if cached is not None:
+            return cached
+
+        if status is None:
+            try:
+                status = self.semaphore.get_task(project_id, task_id).get("status")
+            except Exception as e:
+                logger.warning(
+                    f"Could not fetch status for cache decision (task {task_id}): {e}"
+                )
+
+        if structured:
+            records = self.semaphore.get_task_output(project_id, task_id)
+            lines: list[str] = []
+            structured_times: list[Any] = []
+            structured_stages: list[Any] = []
+            for record in records:
+                record_output = strip_ansi(record.get("output") or "")
+                record_lines = record_output.split("\n")
+                lines.extend(record_lines)
+                structured_times.extend([record.get("time")] * len(record_lines))
+                structured_stages.extend([record.get("stage_id")] * len(record_lines))
+            times: Optional[list] = structured_times
+            stages: Optional[list] = structured_stages
+            total_bytes = sum(len(line.encode("utf-8")) for line in lines)
+        else:
+            raw = self.semaphore.get_task_raw_output(project_id, task_id)
+            lines = [strip_ansi(line) for line in split_lines(raw)]
+            times = None
+            stages = None
+            total_bytes = len(raw.encode("utf-8"))
+
+        value = (lines, times, stages, total_bytes)
+        if status in self._TERMINAL_STATUSES:
+            self._cache_put(key, value)
+        return value
 
     def _build_task_url(self, project_id: int, task_id: int) -> str:
         """Build a web URL for viewing a task in SemaphoreUI.
@@ -890,38 +990,279 @@ class TaskTools(BaseTool):
                 "consecutive_errors": consecutive_errors,
             }
 
-    async def get_task_raw_output(self, project_id: int, task_id: int) -> str:
-        """Get raw output from a completed task for LLM analysis.
+    async def get_task_raw_output(
+        self,
+        project_id: int,
+        task_id: int,
+        max_bytes: int = RAW_OUTPUT_DEFAULT_MAX_BYTES,
+    ) -> dict[str, Any]:
+        """Get raw task output, bounded by default.
 
         Args:
             project_id: ID of the project
             task_id: ID of the task
+            max_bytes: Maximum bytes to return. Pass 0 for the full output.
 
         Returns:
-            Raw task output as plain text
+            Dict with text, byte counts, and truncation metadata
         """
         try:
-            return self.semaphore.get_task_raw_output(project_id, task_id)
+            raw = self.semaphore.get_task_raw_output(project_id, task_id)
+            if max_bytes < 0:
+                max_bytes = self.RAW_OUTPUT_DEFAULT_MAX_BYTES
+            encoded = raw.encode("utf-8")
+            total = len(encoded)
+            if max_bytes and total > max_bytes:
+                text = encoded[-max_bytes:].decode("utf-8", "ignore")
+                return {
+                    "text": text,
+                    "total_bytes": total,
+                    "returned_bytes": len(text.encode("utf-8")),
+                    "truncated": True,
+                    "hint": (
+                        "Output truncated to the tail. Use get_task_output "
+                        "(windowed/searchable) or get_task_output_summary (triage)."
+                    ),
+                }
+            return {
+                "text": raw,
+                "total_bytes": total,
+                "returned_bytes": total,
+                "truncated": False,
+            }
         except Exception as e:
             self.handle_error(e, f"getting raw output for task {task_id}")
+
+    async def get_task_output(
+        self,
+        project_id: int,
+        task_id: int,
+        mode: str = "tail",
+        max_lines: int = DEFAULT_MAX_LINES,
+        offset: int = 0,
+        pattern: Optional[str] = None,
+        regex: bool = False,
+        context_lines: int = 3,
+        include_timestamps: bool = False,
+        stage_id: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """Read a bounded window of task output.
+
+        Modes: tail, head, range, search, failed, changed. Timestamped reads and
+        stage filtering use Semaphore's structured output endpoint; other reads
+        use raw output by default.
+        """
+        try:
+            valid_modes = ["tail", "head", "range", "search", "failed", "changed"]
+            if mode not in valid_modes:
+                return {"error": f"unknown mode {mode!r}", "valid_modes": valid_modes}
+            if mode == "search" and not pattern:
+                return {"error": "mode='search' requires a non-empty 'pattern'."}
+
+            max_lines = clamp(max_lines, 1, self.MAX_LINES_CAP)
+            context_lines = clamp(context_lines, 0, self.MAX_LINES_CAP)
+            structured = include_timestamps or stage_id is not None
+            lines, times, stages, total_bytes = self._load_lines(
+                project_id, task_id, structured=structured
+            )
+
+            if stage_id is not None:
+                if stages is None or all(stage is None for stage in stages):
+                    return {
+                        "error": (
+                            "stage_id filtering requested, but this Semaphore "
+                            "/output response does not include stage_id metadata."
+                        ),
+                        "hint": (
+                            "Use include_timestamps=true without stage_id, or retry "
+                            "stage filtering only against Semaphore output records "
+                            "that expose stage_id."
+                        ),
+                        "task_id": task_id,
+                        "mode": mode,
+                        "requested_stage_id": stage_id,
+                        "total_lines": len(lines),
+                        "total_bytes": total_bytes,
+                    }
+                keep = [i for i, stage in enumerate(stages) if stage == stage_id]
+                lines = [lines[i] for i in keep]
+                times = [times[i] for i in keep] if times is not None else None
+                total_bytes = sum(len(line.encode("utf-8")) for line in lines)
+
+            result: dict[str, Any] = {
+                "task_id": task_id,
+                "mode": mode,
+                "total_lines": len(lines),
+                "total_bytes": total_bytes,
+            }
+
+            if mode in ("tail", "head", "range"):
+                output_window = window(lines, mode, max_lines, offset)
+                result.update(output_window)
+                if include_timestamps and times is not None:
+                    start = output_window["returned_range"][0]
+                    result["lines"] = [
+                        {"time": times[start + i], "text": text}
+                        for i, text in enumerate(output_window["lines"])
+                    ]
+            elif mode == "search":
+                search_result = search(
+                    lines, pattern or "", regex, context_lines, max_lines
+                )
+                result.update(search_result)
+                if (
+                    include_timestamps
+                    and times is not None
+                    and search_result.get("entries")
+                ):
+                    for entry in search_result["entries"]:
+                        entry["time"] = times[entry["line"]]
+            else:
+                marker = FAILURE_RE if mode == "failed" else CHANGED_RE
+                blocks, total = extract_blocks(
+                    lines, marker, self.MAX_FAILURE_BLOCKS, self.LINES_PER_BLOCK
+                )
+                result["fatal_count" if mode == "failed" else "changed_count"] = total
+                result["blocks"] = blocks
+                result["truncated"] = total > len(blocks)
+
+            return result
+        except Exception as e:
+            self.handle_error(e, f"getting output window for task {task_id}")
+
+    def _build_output_excerpt(
+        self, lines: list[str], total_bytes: int
+    ) -> dict[str, Any]:
+        """Build bounded failure-triage output from already-fetched lines."""
+        blocks, fatal_count = extract_blocks(
+            lines, FAILURE_RE, self.MAX_FAILURE_BLOCKS, self.LINES_PER_BLOCK
+        )
+        recap = extract_recap(lines)
+        tail = window(lines, "tail", 20)["lines"]
+        first_failure_line = blocks[0]["line_range"][0] if blocks else None
+        matched_text = "\n".join(
+            [line for block in blocks for line in block["lines"]] + recap
+        )
+
+        return {
+            "total_lines": len(lines),
+            "total_bytes": total_bytes,
+            "fatal_count": fatal_count,
+            "first_failure_line": first_failure_line,
+            "blocks": blocks,
+            "blocks_truncated": fatal_count > len(blocks),
+            "recap": recap,
+            "tail": tail,
+            "matched_text": matched_text,
+        }
+
+    def _gather_task_context(self, project_id: int, task_id: int) -> dict[str, Any]:
+        """Gather task/template/project metadata for triage and analysis."""
+        task = self.semaphore.get_task(project_id, task_id)
+        template_id = task.get("template_id") or task.get("template", {}).get("id")
+
+        template_context = None
+        if template_id:
+            try:
+                template_context = self.semaphore.get_template(project_id, template_id)
+            except Exception as e:
+                logger.warning(f"Could not fetch template {template_id}: {str(e)}")
+
+        project_context = None
+        try:
+            projects = self.semaphore.list_projects()
+            project_list = (
+                projects if isinstance(projects, list) else projects.get("projects", [])
+            )
+            project_context = next(
+                (
+                    project
+                    for project in project_list
+                    if project.get("id") == project_id
+                ),
+                None,
+            )
+        except Exception as e:
+            logger.warning(f"Could not fetch project context: {str(e)}")
+
+        return {
+            "task_details": {
+                "id": task_id,
+                "status": task.get("status"),
+                "created": task.get("created"),
+                "started": task.get("started"),
+                "ended": task.get("ended"),
+                "message": task.get("message"),
+                "template_id": template_id,
+                "debug": task.get("debug"),
+                "environment": task.get("environment"),
+            },
+            "project_context": {
+                "id": project_id,
+                "name": project_context.get("name") if project_context else None,
+                "repository": project_context.get("repository")
+                if project_context
+                else None,
+            },
+            "template_context": {
+                "id": template_id,
+                "name": template_context.get("name") if template_context else None,
+                "playbook": template_context.get("playbook")
+                if template_context
+                else None,
+                "arguments": template_context.get("arguments")
+                if template_context
+                else None,
+                "description": template_context.get("description")
+                if template_context
+                else None,
+            }
+            if template_context
+            else None,
+        }
+
+    async def get_task_output_summary(
+        self, project_id: int, task_id: int
+    ) -> dict[str, Any]:
+        """Return bounded task-output triage plus task/template/project context."""
+        try:
+            context = self._gather_task_context(project_id, task_id)
+            status = context["task_details"]["status"]
+            lines, _times, _stages, total_bytes = self._load_lines(
+                project_id, task_id, status=status
+            )
+            excerpt = self._build_output_excerpt(lines, total_bytes)
+            return {
+                **context,
+                "failures": {
+                    "fatal_count": excerpt["fatal_count"],
+                    "first_failure_line": excerpt["first_failure_line"],
+                    "blocks": excerpt["blocks"],
+                    "blocks_truncated": excerpt["blocks_truncated"],
+                },
+                "recap": excerpt["recap"],
+                "tail": excerpt["tail"],
+                "total_lines": excerpt["total_lines"],
+                "total_bytes": excerpt["total_bytes"],
+                "more": "Use get_task_output(mode='range'|'search') to read other regions.",
+            }
+        except Exception as e:
+            self.handle_error(e, f"summarizing output for task {task_id}")
 
     async def analyze_task_failure(
         self, project_id: int, task_id: int
     ) -> dict[str, Any]:
-        """Analyze a failed task for LLM processing, gathering comprehensive failure context.
+        """DEPRECATED: prefer get_task_output_summary for bounded failure triage.
 
         Args:
             project_id: ID of the project
             task_id: ID of the task to analyze
 
         Returns:
-            Comprehensive failure analysis data including task details, template context, and outputs
+            Failure analysis data with bounded output excerpt
         """
         try:
-            # Get task details
             task = self.semaphore.get_task(project_id, task_id)
-
-            # Verify this is actually a failed task
             if task.get("status") != "error":
                 return {
                     "warning": f"Task {task_id} has status '{task.get('status')}', not 'error'",
@@ -929,97 +1270,25 @@ class TaskTools(BaseTool):
                     "analysis_applicable": False,
                 }
 
-            # Get template context
-            template_id = task.get("template_id") or task.get("template", {}).get("id")
-            template_context = None
-            if template_id:
-                try:
-                    template_context = self.semaphore.get_template(
-                        project_id, template_id
-                    )
-                except Exception as e:
-                    logger.warning(f"Could not fetch template {template_id}: {str(e)}")
-
-            # Get raw output for analysis
-            raw_output = None
-
+            context = self._gather_task_context(project_id, task_id)
+            excerpt = None
             try:
-                raw_output = self.semaphore.get_task_raw_output(project_id, task_id)
+                lines, _times, _stages, total_bytes = self._load_lines(
+                    project_id, task_id, status="error"
+                )
+                excerpt = self._build_output_excerpt(lines, total_bytes)
             except Exception as e:
                 logger.warning(f"Could not fetch raw output: {str(e)}")
 
-            # Get project context
-            project_context = None
-            try:
-                projects = self.semaphore.list_projects()
-                if isinstance(projects, list):
-                    project_context = next(
-                        (p for p in projects if p.get("id") == project_id), None
-                    )
-                elif isinstance(projects, dict) and "projects" in projects:
-                    project_context = next(
-                        (p for p in projects["projects"] if p.get("id") == project_id),
-                        None,
-                    )
-            except Exception as e:
-                logger.warning(f"Could not fetch project context: {str(e)}")
-
             return {
                 "analysis_ready": True,
-                "task_details": {
-                    "id": task_id,
-                    "status": task.get("status"),
-                    "created": task.get("created"),
-                    "started": task.get("started"),
-                    "ended": task.get("ended"),
-                    "message": task.get("message"),
-                    "debug": task.get("debug"),
-                    "environment": task.get("environment"),
-                    "template_id": template_id,
-                },
-                "project_context": {
-                    "id": project_id,
-                    "name": project_context.get("name") if project_context else None,
-                    "repository": (
-                        project_context.get("repository") if project_context else None
-                    ),
-                },
-                "template_context": (
-                    {
-                        "id": template_id,
-                        "name": (
-                            template_context.get("name") if template_context else None
-                        ),
-                        "playbook": (
-                            template_context.get("playbook")
-                            if template_context
-                            else None
-                        ),
-                        "arguments": (
-                            template_context.get("arguments")
-                            if template_context
-                            else None
-                        ),
-                        "description": (
-                            template_context.get("description")
-                            if template_context
-                            else None
-                        ),
-                    }
-                    if template_context
-                    else None
-                ),
-                "outputs": {
-                    "raw": raw_output,
-                    "has_raw_output": raw_output is not None,
-                },
+                "deprecated": "Use get_task_output_summary for bounded triage.",
+                **context,
+                "outputs": {"excerpt": excerpt, "has_output": excerpt is not None},
                 "analysis_guidance": {
                     "focus_areas": [
-                        "Check raw output for specific error messages",
-                        "Look for Ansible task failures in the execution log",
-                        "Examine any Python tracebacks or syntax errors",
-                        "Check for connectivity or authentication issues",
-                        "Look for missing files or incorrect paths",
+                        "Check the failed TASK blocks for the error message",
+                        "Look for connectivity or authentication issues",
                         "Verify playbook syntax and variable usage",
                     ],
                     "common_failure_patterns": [
@@ -1037,13 +1306,13 @@ class TaskTools(BaseTool):
             self.handle_error(e, f"analyzing failure for task {task_id}")
 
     async def bulk_analyze_failures(
-        self, project_id: int, limit: int = 10
+        self, project_id: int, limit: int = 5
     ) -> dict[str, Any]:
         """Analyze multiple failed tasks to identify patterns and common issues.
 
         Args:
             project_id: ID of the project
-            limit: Maximum number of failed tasks to analyze (default: 10)
+            limit: Maximum number of failed tasks to analyze (default: 5)
 
         Returns:
             Analysis of multiple failed tasks with pattern detection
@@ -1077,16 +1346,16 @@ class TaskTools(BaseTool):
                         analyses.append(analysis)
 
                         # Extract patterns for analysis
-                        template_name = analysis.get("template_context", {}).get(
-                            "name", "Unknown"
-                        )
+                        template_context = analysis.get("template_context") or {}
+                        template_name = template_context.get("name", "Unknown")
                         template_failure_counts[template_name] = (
                             template_failure_counts.get(template_name, 0) + 1
                         )
 
-                        # Look for common error patterns in raw output
-                        raw_output = analysis.get("outputs", {}).get("raw", "")
-                        if raw_output:
+                        # Look for common error patterns in the bounded excerpt.
+                        excerpt = analysis.get("outputs", {}).get("excerpt") or {}
+                        matched_text = excerpt.get("matched_text", "")
+                        if matched_text:
                             # Simple pattern matching for common errors
                             common_patterns = [
                                 (
@@ -1131,7 +1400,7 @@ class TaskTools(BaseTool):
 
                             for pattern_name, keywords in common_patterns:
                                 if any(
-                                    keyword.lower() in raw_output.lower()
+                                    keyword.lower() in matched_text.lower()
                                     for keyword in keywords
                                 ):
                                     error_patterns[pattern_name] = (

@@ -868,6 +868,11 @@ class SemaphoreAPIClient:
         # Return raw text content instead of trying to parse as JSON
         return response.text
 
+    def get_task_output(self, project_id: int, task_id: int) -> list[dict[str, Any]]:
+        """Get structured per-line task output records."""
+        result = self._request("GET", f"project/{project_id}/tasks/{task_id}/output")
+        return result if isinstance(result, list) else []
+
     def delete_task(self, project_id: int, task_id: int) -> dict[str, Any]:
         """Delete task and its output."""
         return self._request("DELETE", f"project/{project_id}/tasks/{task_id}")
