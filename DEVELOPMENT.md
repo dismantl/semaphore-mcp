@@ -12,7 +12,7 @@ This guide covers local development setup, testing, and contributing to the proj
 
 ```bash
 # Clone the repository
-git clone https://github.com/cloin/semaphore-mcp.git
+git clone https://github.com/dismantl/semaphore-mcp.git
 cd semaphore-mcp
 
 # Create virtual environment and install dependencies
@@ -86,13 +86,14 @@ For local development with STDIO mode, configure Claude Desktop to use your virt
 docker run -d \
   --name semaphore-dev \
   -p 3000:3000 \
-  -e SEMAPHORE_DB_DIALECT=bolt \
+  -e SEMAPHORE_DB_DIALECT=sqlite \
   -e SEMAPHORE_ADMIN_PASSWORD=admin123 \
   -e SEMAPHORE_ADMIN_NAME=admin \
   -e SEMAPHORE_ADMIN_EMAIL=admin@localhost \
   -e SEMAPHORE_ADMIN=admin \
-  -v semaphore-data:/etc/semaphore \
-  semaphoreui/semaphore:latest
+  -e SEMAPHORE_ACCESS_KEY_ENCRYPTION=gs72mPntFATGJs9qK0pQ0rKtfidlexiMjYCH9gWKhTU= \
+  -v semaphore-data:/var/lib/semaphore \
+  semaphoreui/semaphore:v2.18.12
 ```
 
 Then:
@@ -182,12 +183,9 @@ semaphore-mcp/
 
 ## GitHub Actions CI/CD
 
-If contributing, ensure the repository has these secrets configured for CI:
-
-- `ADMIN_USERNAME`: SemaphoreUI admin username (e.g., "admin")
-- `ADMIN_PASSWORD`: SemaphoreUI admin password (e.g., "admin123")
-
-These are used for integration tests in CI. Local development can use environment variables or `.env` files.
+CI generates throwaway Semaphore credentials for integration tests, so forked
+repos do not need custom Semaphore admin secrets. Docker publishing to GHCR uses
+the default `GITHUB_TOKEN` with package write permission.
 
 ## Troubleshooting
 

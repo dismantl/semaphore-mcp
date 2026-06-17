@@ -1,11 +1,11 @@
 services:
   semaphore:
-    image: semaphoreui/semaphore:latest
+    image: semaphoreui/semaphore:v2.18.12
     container_name: semaphore-test
     ports:
       - "3000:3000"
     environment:
-      SEMAPHORE_DB_DIALECT: bolt
+      SEMAPHORE_DB_DIALECT: sqlite
       SEMAPHORE_ADMIN_PASSWORD: ${SEMAPHORE_ADMIN_PASSWORD:-changeme123}
       SEMAPHORE_ADMIN_NAME: ${SEMAPHORE_ADMIN_NAME:-admin}
       SEMAPHORE_ADMIN_EMAIL: ${SEMAPHORE_ADMIN_EMAIL:-admin@localhost}

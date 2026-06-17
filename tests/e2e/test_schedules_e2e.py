@@ -134,7 +134,7 @@ class TestSchedulesE2E:
 
     @pytest.mark.skip(
         reason=(
-            "semaphoreui/semaphore:latest still validates run_at schedules as cron "
+            "Semaphore still validates run_at schedules as cron "
             "schedules and returns 'Cron: empty spec string'"
         )
     )

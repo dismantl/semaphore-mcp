@@ -27,7 +27,7 @@ docker run -d --name semaphore-mcp \
   -e SEMAPHORE_URL=http://localhost:3000 \
   -e SEMAPHORE_API_TOKEN=your-token-here \
   -e MCP_PORT=8500 \
-  ghcr.io/cloin/semaphore-mcp:latest
+  ghcr.io/dismantl/semaphore-mcp:latest
 ```
 
 > **Note:** `SEMAPHORE_URL` is where the MCP server connects to SemaphoreUI. `MCP_PORT` is where the MCP server listens for client connections (Claude Desktop/Code). Use this port in your client configuration below.
@@ -86,7 +86,7 @@ docker run -d --name semaphore-mcp \
   -e SEMAPHORE_URL=http://localhost:3000 \
   -e SEMAPHORE_API_TOKEN=your-token \
   -e MCP_PORT=8500 \
-  ghcr.io/cloin/semaphore-mcp:latest
+  ghcr.io/dismantl/semaphore-mcp:latest
 ```
 
 **SemaphoreUI on a different host:**
@@ -98,7 +98,7 @@ docker run -d --name semaphore-mcp \
   -e SEMAPHORE_URL=http://192.168.1.100:3000 \
   -e SEMAPHORE_API_TOKEN=your-token \
   -p 8500:8000 \
-  ghcr.io/cloin/semaphore-mcp:latest
+  ghcr.io/dismantl/semaphore-mcp:latest
 ```
 
 For more details, see [Docker's networking documentation](https://docs.docker.com/network/).
@@ -190,7 +190,7 @@ docker run -d --name semaphore-mcp \
   -e SEMAPHORE_API_TOKEN=your-token \
   -e MCP_PORT=8500 \
   -e MCP_LOG_LEVEL=DEBUG \
-  ghcr.io/cloin/semaphore-mcp:latest
+  ghcr.io/dismantl/semaphore-mcp:latest
 ```
 
 ## Development
@@ -204,7 +204,7 @@ For testing documentation (unit tests, E2E tests, CI/CD), see [TESTING.md](TESTI
 - [SemaphoreUI Documentation](https://docs.semaphoreui.com/)
 - [SemaphoreUI API Reference](https://semaphoreui.com/api-docs/)
 - [Model Context Protocol](https://modelcontextprotocol.io/)
-- [GitHub Issues](https://github.com/cloin/semaphore-mcp/issues)
+- [GitHub Issues](https://github.com/dismantl/semaphore-mcp/issues)
 
 ## License
 
