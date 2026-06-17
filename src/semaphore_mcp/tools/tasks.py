@@ -1226,20 +1226,17 @@ class TaskTools(BaseTool):
     async def analyze_task_failure(
         self, project_id: int, task_id: int
     ) -> dict[str, Any]:
-        """Analyze a failed task for LLM processing, gathering comprehensive failure context.
+        """DEPRECATED: prefer get_task_output_summary for bounded failure triage.
 
         Args:
             project_id: ID of the project
             task_id: ID of the task to analyze
 
         Returns:
-            Comprehensive failure analysis data including task details, template context, and outputs
+            Failure analysis data with bounded output excerpt
         """
         try:
-            # Get task details
             task = self.semaphore.get_task(project_id, task_id)
-
-            # Verify this is actually a failed task
             if task.get("status") != "error":
                 return {
                     "warning": f"Task {task_id} has status '{task.get('status')}', not 'error'",
@@ -1247,97 +1244,25 @@ class TaskTools(BaseTool):
                     "analysis_applicable": False,
                 }
 
-            # Get template context
-            template_id = task.get("template_id") or task.get("template", {}).get("id")
-            template_context = None
-            if template_id:
-                try:
-                    template_context = self.semaphore.get_template(
-                        project_id, template_id
-                    )
-                except Exception as e:
-                    logger.warning(f"Could not fetch template {template_id}: {str(e)}")
-
-            # Get raw output for analysis
-            raw_output = None
-
+            context = self._gather_task_context(project_id, task_id)
+            excerpt = None
             try:
-                raw_output = self.semaphore.get_task_raw_output(project_id, task_id)
+                lines, _times, _stages, total_bytes = self._load_lines(
+                    project_id, task_id, status="error"
+                )
+                excerpt = self._build_output_excerpt(lines, total_bytes)
             except Exception as e:
                 logger.warning(f"Could not fetch raw output: {str(e)}")
 
-            # Get project context
-            project_context = None
-            try:
-                projects = self.semaphore.list_projects()
-                if isinstance(projects, list):
-                    project_context = next(
-                        (p for p in projects if p.get("id") == project_id), None
-                    )
-                elif isinstance(projects, dict) and "projects" in projects:
-                    project_context = next(
-                        (p for p in projects["projects"] if p.get("id") == project_id),
-                        None,
-                    )
-            except Exception as e:
-                logger.warning(f"Could not fetch project context: {str(e)}")
-
             return {
                 "analysis_ready": True,
-                "task_details": {
-                    "id": task_id,
-                    "status": task.get("status"),
-                    "created": task.get("created"),
-                    "started": task.get("started"),
-                    "ended": task.get("ended"),
-                    "message": task.get("message"),
-                    "debug": task.get("debug"),
-                    "environment": task.get("environment"),
-                    "template_id": template_id,
-                },
-                "project_context": {
-                    "id": project_id,
-                    "name": project_context.get("name") if project_context else None,
-                    "repository": (
-                        project_context.get("repository") if project_context else None
-                    ),
-                },
-                "template_context": (
-                    {
-                        "id": template_id,
-                        "name": (
-                            template_context.get("name") if template_context else None
-                        ),
-                        "playbook": (
-                            template_context.get("playbook")
-                            if template_context
-                            else None
-                        ),
-                        "arguments": (
-                            template_context.get("arguments")
-                            if template_context
-                            else None
-                        ),
-                        "description": (
-                            template_context.get("description")
-                            if template_context
-                            else None
-                        ),
-                    }
-                    if template_context
-                    else None
-                ),
-                "outputs": {
-                    "raw": raw_output,
-                    "has_raw_output": raw_output is not None,
-                },
+                "deprecated": "Use get_task_output_summary for bounded triage.",
+                **context,
+                "outputs": {"excerpt": excerpt, "has_output": excerpt is not None},
                 "analysis_guidance": {
                     "focus_areas": [
-                        "Check raw output for specific error messages",
-                        "Look for Ansible task failures in the execution log",
-                        "Examine any Python tracebacks or syntax errors",
-                        "Check for connectivity or authentication issues",
-                        "Look for missing files or incorrect paths",
+                        "Check the failed TASK blocks for the error message",
+                        "Look for connectivity or authentication issues",
                         "Verify playbook syntax and variable usage",
                     ],
                     "common_failure_patterns": [
@@ -1355,13 +1280,13 @@ class TaskTools(BaseTool):
             self.handle_error(e, f"analyzing failure for task {task_id}")
 
     async def bulk_analyze_failures(
-        self, project_id: int, limit: int = 10
+        self, project_id: int, limit: int = 5
     ) -> dict[str, Any]:
         """Analyze multiple failed tasks to identify patterns and common issues.
 
         Args:
             project_id: ID of the project
-            limit: Maximum number of failed tasks to analyze (default: 10)
+            limit: Maximum number of failed tasks to analyze (default: 5)
 
         Returns:
             Analysis of multiple failed tasks with pattern detection
@@ -1395,16 +1320,16 @@ class TaskTools(BaseTool):
                         analyses.append(analysis)
 
                         # Extract patterns for analysis
-                        template_name = analysis.get("template_context", {}).get(
-                            "name", "Unknown"
-                        )
+                        template_context = analysis.get("template_context") or {}
+                        template_name = template_context.get("name", "Unknown")
                         template_failure_counts[template_name] = (
                             template_failure_counts.get(template_name, 0) + 1
                         )
 
-                        # Look for common error patterns in raw output
-                        raw_output = analysis.get("outputs", {}).get("raw", "")
-                        if raw_output:
+                        # Look for common error patterns in the bounded excerpt.
+                        excerpt = analysis.get("outputs", {}).get("excerpt") or {}
+                        matched_text = excerpt.get("matched_text", "")
+                        if matched_text:
                             # Simple pattern matching for common errors
                             common_patterns = [
                                 (
@@ -1449,7 +1374,7 @@ class TaskTools(BaseTool):
 
                             for pattern_name, keywords in common_patterns:
                                 if any(
-                                    keyword.lower() in raw_output.lower()
+                                    keyword.lower() in matched_text.lower()
                                     for keyword in keywords
                                 ):
                                     error_patterns[pattern_name] = (

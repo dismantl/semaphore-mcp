@@ -971,8 +971,8 @@ class TestTaskTools:
         assert result["failures"]["first_failure_line"] is None
 
     @pytest.mark.asyncio
-    async def test_analyze_task_failure(self, task_tools):
-        """Test analyze_task_failure method for a failed task."""
+    async def test_analyze_task_failure_is_bounded(self, task_tools):
+        """Test analyze_task_failure returns a bounded excerpt, not raw output."""
         project_id = 1
         task_id = 42
         template_id = 5
@@ -1007,14 +1007,11 @@ class TestTaskTools:
             }
         ]
 
-        # Mock outputs
-        mock_raw_output = "TASK [test] failed: host unreachable"
-
         # Set up mocks
         task_tools.semaphore.get_task.return_value = mock_task
         task_tools.semaphore.get_template.return_value = mock_template
         task_tools.semaphore.list_projects.return_value = mock_projects
-        task_tools.semaphore.get_task_raw_output.return_value = mock_raw_output
+        task_tools.semaphore.get_task_raw_output.return_value = SAMPLE_LOG
 
         # Call the method
         result = await task_tools.analyze_task_failure(project_id, task_id)
@@ -1031,8 +1028,10 @@ class TestTaskTools:
         assert result["template_context"]["id"] == template_id
         assert result["template_context"]["name"] == "Test Template"
 
-        assert result["outputs"]["raw"] == mock_raw_output
-        assert result["outputs"]["has_raw_output"] is True
+        assert "raw" not in result["outputs"]
+        assert result["outputs"]["excerpt"]["fatal_count"] == 1
+        assert result["outputs"]["has_output"] is True
+        assert result.get("deprecated")
 
         # Verify analysis guidance is included
         assert "analysis_guidance" in result
@@ -1079,17 +1078,17 @@ class TestTaskTools:
         mock_analysis_1 = {
             "analysis_ready": True,
             "template_context": {"name": "Template A"},
-            "outputs": {"raw": "connection timeout error"},
+            "outputs": {"excerpt": {"matched_text": "connection timeout error"}},
         }
         mock_analysis_2 = {
             "analysis_ready": True,
             "template_context": {"name": "Template A"},
-            "outputs": {"raw": "authentication failed"},
+            "outputs": {"excerpt": {"matched_text": "authentication failed"}},
         }
         mock_analysis_3 = {
             "analysis_ready": True,
             "template_context": {"name": "Template B"},
-            "outputs": {"raw": "syntax error in playbook"},
+            "outputs": {"excerpt": {"matched_text": "syntax error in playbook"}},
         }
 
         # Set up mocks
@@ -1142,6 +1141,9 @@ class TestTaskTools:
         assert "message" in result
         assert "No failed tasks found" in result["message"]
         assert result["failed_task_count"] == 0
+        task_tools.filter_tasks.assert_called_once_with(
+            project_id, status=["failed"], limit=5
+        )
 
 
 class TestTaskToolsEdgeCases:

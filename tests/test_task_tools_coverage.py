@@ -461,6 +461,8 @@ class TestTaskToolsCoverage:
 
         assert result["analysis_ready"] is True
         assert result["template_context"] is None  # Should be None due to error
+        assert "raw" not in result["outputs"]
+        assert result["outputs"]["has_output"] is True
 
     @pytest.mark.asyncio
     async def test_analyze_task_failure_output_fetch_errors(self, task_tools):
@@ -475,8 +477,8 @@ class TestTaskToolsCoverage:
         result = await task_tools.analyze_task_failure(1, 1)
 
         assert result["analysis_ready"] is True
-        assert result["outputs"]["raw"] is None
-        assert result["outputs"]["has_raw_output"] is False
+        assert result["outputs"]["excerpt"] is None
+        assert result["outputs"]["has_output"] is False
 
     @pytest.mark.asyncio
     async def test_bulk_analyze_failures_no_failed_tasks(self, task_tools):
@@ -503,13 +505,15 @@ class TestTaskToolsCoverage:
                 return {
                     "analysis_ready": True,
                     "template_context": {"name": "Template A"},
-                    "outputs": {"raw": "connection timeout error occurred"},
+                    "outputs": {
+                        "excerpt": {"matched_text": "connection timeout error occurred"}
+                    },
                 }
             else:
                 return {
                     "analysis_ready": True,
                     "template_context": {"name": "Template B"},
-                    "outputs": {"raw": "authentication failed"},
+                    "outputs": {"excerpt": {"matched_text": "authentication failed"}},
                 }
 
         task_tools.analyze_task_failure = AsyncMock(side_effect=mock_analyze_failure)
