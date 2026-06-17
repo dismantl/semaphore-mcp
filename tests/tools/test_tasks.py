@@ -665,10 +665,47 @@ class TestTaskTools:
         result = await task_tools.get_task_raw_output(project_id, task_id)
 
         # Verify the result
-        assert result == mock_raw_output
+        assert result["text"] == mock_raw_output
+        assert result["total_bytes"] == len(mock_raw_output.encode("utf-8"))
+        assert result["returned_bytes"] == len(mock_raw_output.encode("utf-8"))
+        assert result["truncated"] is False
         task_tools.semaphore.get_task_raw_output.assert_called_once_with(
             project_id, task_id
         )
+
+    @pytest.mark.asyncio
+    async def test_get_task_raw_output_small_not_truncated(self, task_tools):
+        """Test short raw output is not truncated."""
+        task_tools.semaphore.get_task_raw_output.return_value = "short output"
+
+        result = await task_tools.get_task_raw_output(1, 42)
+
+        assert result["text"] == "short output"
+        assert result["truncated"] is False
+
+    @pytest.mark.asyncio
+    async def test_get_task_raw_output_truncates_to_tail(self, task_tools):
+        """Test raw output truncation keeps the tail."""
+        big = "X" * 100 + "TAILMARKER"
+        task_tools.semaphore.get_task_raw_output.return_value = big
+
+        result = await task_tools.get_task_raw_output(1, 42, max_bytes=20)
+
+        assert result["truncated"] is True
+        assert result["text"].endswith("TAILMARKER")
+        assert result["returned_bytes"] <= 20
+        assert "get_task_output" in result["hint"]
+
+    @pytest.mark.asyncio
+    async def test_get_task_raw_output_max_bytes_zero_returns_all(self, task_tools):
+        """Test max_bytes=0 returns the full raw output."""
+        big = "Y" * 100
+        task_tools.semaphore.get_task_raw_output.return_value = big
+
+        result = await task_tools.get_task_raw_output(1, 42, max_bytes=0)
+
+        assert result["truncated"] is False
+        assert result["text"] == big
 
     @pytest.mark.asyncio
     async def test_get_task_raw_output_error(self, task_tools):

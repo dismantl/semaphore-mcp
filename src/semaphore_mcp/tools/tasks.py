@@ -990,18 +990,45 @@ class TaskTools(BaseTool):
                 "consecutive_errors": consecutive_errors,
             }
 
-    async def get_task_raw_output(self, project_id: int, task_id: int) -> str:
-        """Get raw output from a completed task for LLM analysis.
+    async def get_task_raw_output(
+        self,
+        project_id: int,
+        task_id: int,
+        max_bytes: int = RAW_OUTPUT_DEFAULT_MAX_BYTES,
+    ) -> dict[str, Any]:
+        """Get raw task output, bounded by default.
 
         Args:
             project_id: ID of the project
             task_id: ID of the task
+            max_bytes: Maximum bytes to return. Pass 0 for the full output.
 
         Returns:
-            Raw task output as plain text
+            Dict with text, byte counts, and truncation metadata
         """
         try:
-            return self.semaphore.get_task_raw_output(project_id, task_id)
+            raw = self.semaphore.get_task_raw_output(project_id, task_id)
+            max_bytes = max(0, max_bytes)
+            encoded = raw.encode("utf-8")
+            total = len(encoded)
+            if max_bytes and total > max_bytes:
+                text = encoded[-max_bytes:].decode("utf-8", "ignore")
+                return {
+                    "text": text,
+                    "total_bytes": total,
+                    "returned_bytes": len(text.encode("utf-8")),
+                    "truncated": True,
+                    "hint": (
+                        "Output truncated to the tail. Use get_task_output "
+                        "(windowed/searchable) or get_task_output_summary (triage)."
+                    ),
+                }
+            return {
+                "text": raw,
+                "total_bytes": total,
+                "returned_bytes": total,
+                "truncated": False,
+            }
         except Exception as e:
             self.handle_error(e, f"getting raw output for task {task_id}")
 
