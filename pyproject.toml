@@ -22,10 +22,10 @@ dev = [ "pytest>=7.4.0", "pytest-asyncio>=0.21.1", "pytest-cov>=4.1.0", "ruff>=0
 server = [ "fastapi>=0.104.0", "uvicorn>=0.23.2",]
 
 [project.urls]
-Homepage = "https://github.com/cloin/semaphore-mcp"
-"Bug Tracker" = "https://github.com/cloin/semaphore-mcp/issues"
-Documentation = "https://github.com/cloin/semaphore-mcp#readme"
-"Source Code" = "https://github.com/cloin/semaphore-mcp"
+Homepage = "https://github.com/dismantl/semaphore-mcp"
+"Bug Tracker" = "https://github.com/dismantl/semaphore-mcp/issues"
+Documentation = "https://github.com/dismantl/semaphore-mcp#readme"
+"Source Code" = "https://github.com/dismantl/semaphore-mcp"
 
 [project.scripts]
 semaphore-mcp = "semaphore_mcp.scripts.start_server:main"
