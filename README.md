@@ -143,9 +143,9 @@ Once connected, you can interact with SemaphoreUI through natural conversation:
 
 **Schedules:** `list_schedules`, `list_template_schedules`, `get_schedule`, `create_schedule`, `update_schedule`, `set_schedule_active`, `delete_schedule`, `validate_schedule_cron_format`
 
-**Tasks:** `list_tasks`, `get_task`, `run_task`, `stop_task`, `get_task_raw_output`, `filter_tasks`, `bulk_stop_tasks`
+**Tasks:** `list_tasks`, `get_task`, `run_task`, `stop_task`, `get_task_output`, `get_task_output_summary`, `get_task_raw_output`, `filter_tasks`, `bulk_stop_tasks`
 
-**Analysis:** `analyze_task_failure`, `bulk_analyze_failures`, `get_latest_failed_task`
+**Analysis:** `analyze_task_failure` (deprecated), `bulk_analyze_failures`, `get_latest_failed_task`
 
 **Events:** `list_events`, `get_last_events`, `list_project_events`, `summarize_project_activity`
 
@@ -156,6 +156,14 @@ Once connected, you can interact with SemaphoreUI through natural conversation:
 **Repositories:** `list_repositories`, `get_repository`, `create_repository`, `update_repository`, `delete_repository`
 
 **Access keys:** `list_access_keys`, `get_access_key`, `create_access_key`, `update_access_key`, `delete_access_key`
+
+### Reading Task Logs
+
+Use `get_task_output_summary` first when a task failed. It returns bounded failure blocks, the play recap, tail output, and task/template/project context without inlining the full log.
+
+Use `get_task_output` to page or search task output. It supports `tail`, `head`, `range`, `search`, `failed`, and `changed` modes. Set `include_timestamps=true` or `stage_id=<id>` when you need structured `/output` metadata or a per-stage view.
+
+`get_task_raw_output` is bounded by default and returns a tail excerpt with truncation metadata. Pass `max_bytes=0` only when the client really needs the full raw blob. Completed-task output is cached server-side for windowed and summary reads; running tasks are always fetched fresh.
 
 ## Troubleshooting
 
