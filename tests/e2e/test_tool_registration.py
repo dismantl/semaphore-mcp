@@ -55,12 +55,14 @@ EXPECTED_TOOLS = {
     "set_schedule_active",
     "delete_schedule",
     "validate_schedule_cron_format",
-    # Task tools (11) - restart_task and bulk_restart_tasks are commented out in tasks.py
+    # Task tools (13) - restart_task and bulk_restart_tasks are commented out in tasks.py
     "list_tasks",
     "get_task",
     "run_task",
     "stop_task",
     "get_latest_failed_task",
+    "get_task_output",
+    "get_task_output_summary",
     "filter_tasks",
     "bulk_stop_tasks",
     "get_waiting_tasks",
