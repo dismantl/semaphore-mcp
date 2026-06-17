@@ -9,7 +9,7 @@ This directory contains end-to-end tests for the Semaphore MCP server using the 
 These tests validate the MCP server by:
 1. Starting both Semaphore and Semaphore-MCP containers
 2. Using MCP Inspector CLI to interact with the server as a real MCP client
-3. Testing all 37 MCP tools across different scenarios
+3. Testing all 71 registered MCP tools across different scenarios
 4. Verifying correct integration with SemaphoreUI
 
 ## Test Structure
@@ -25,21 +25,33 @@ These tests validate the MCP server by:
 
 | File | Description | Tests Enabled |
 |------|-------------|---------------|
-| `test_tool_registration.py` | Verifies all 37 MCP tools are registered | Yes |
+| `test_tool_registration.py` | Verifies all 71 MCP tools are registered | Yes |
 | `test_projects_e2e.py` | Project CRUD operations | Yes |
+| `test_project_backups_e2e.py` | Project backup and restore operations | Yes |
+| `test_project_users_e2e.py` | Project user role operations | Yes |
+| `test_views_e2e.py` | View CRUD operations | Yes |
+| `test_schedules_e2e.py` | Schedule CRUD and validation | Yes |
 | `test_environments_e2e.py` | Environment + Inventory CRUD | Yes |
+| `test_access_keys_e2e.py` | Access key CRUD operations | Yes |
+| `test_events_e2e.py` | Event listing and summaries | Yes |
 | `test_repositories_e2e.py` | Repository operations (requires SSH key) | List only |
 | `test_templates_e2e.py` | Template operations (requires full setup) | List only |
 | `test_tasks_e2e.py` | Task operations (requires templates) | List/filter only |
+| `test_task_execution_e2e.py` | Task launch/output flows (requires templates) | Partial |
 | `test_comprehensive_scenario.py` | Full deployment scenario | No (requires setup) |
 
-### Expected Tools (37 total)
+### Expected Tools (71 total)
 
-- **Projects** (5): list, get, create, update, delete
+- **Events** (4): list, get_last, list_project, summarize_project_activity
+- **Projects** (10): list, get, create, update, delete, backup, restore_backup, validate_backup, summarize_backup, clone
+- **Project users** (5): get_role, list, add, update, remove
+- **Views** (5): list, get, create, update, delete
 - **Templates** (6): list, get, create, update, delete, stop_all_tasks
-- **Tasks** (11): list, get, run, stop, filter, bulk_stop, get_waiting, get_latest_failed, get_raw_output, analyze_failure, bulk_analyze_failures
+- **Schedules** (8): list, list_template, get, create, update, set_active, delete, validate_cron_format
+- **Tasks** (13): list, get, run, stop, get_latest_failed, get_output, get_output_summary, filter, bulk_stop, get_waiting, get_raw_output, analyze_failure, bulk_analyze_failures
 - **Environments** (10): environment and inventory CRUD operations
 - **Repositories** (5): list, get, create, update, delete
+- **Access keys** (5): list, get, create, update, delete
 
 ### `test_comprehensive_scenario.py`
 **Real-world simulation** that exercises multiple tools in a realistic deployment scenario:
