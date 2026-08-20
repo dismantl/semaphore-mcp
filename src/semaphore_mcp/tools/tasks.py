@@ -5,6 +5,7 @@ This module provides tools for interacting with Semaphore tasks.
 """
 
 import asyncio
+import json
 import logging
 import time
 from collections import OrderedDict
@@ -26,6 +27,8 @@ from ..output_utils import (
 from .base import BaseTool
 
 logger = logging.getLogger(__name__)
+
+TaskArguments = Optional[Union[str, list[str]]]
 
 
 class TaskTools(BaseTool):
@@ -313,7 +316,7 @@ class TaskTools(BaseTool):
         playbook: Optional[str] = None,
         git_branch: Optional[str] = None,
         message: Optional[str] = None,
-        arguments: Optional[str] = None,
+        arguments: TaskArguments = None,
         inventory_id: Optional[int] = None,
         follow: bool = False,
     ) -> dict[str, Any]:
@@ -330,7 +333,7 @@ class TaskTools(BaseTool):
             playbook: Override playbook file path
             git_branch: Override git branch to use
             message: Task description/message
-            arguments: Additional CLI arguments
+            arguments: Additional CLI arguments as a JSON string or string list
             inventory_id: Override inventory to use
             follow: Enable 30-second monitoring for startup verification (default: False)
 
@@ -412,6 +415,9 @@ class TaskTools(BaseTool):
 
             # Now run the task with the determined project_id
             try:
+                serialized_arguments = (
+                    json.dumps(arguments) if isinstance(arguments, list) else arguments
+                )
                 task_result = self.semaphore.run_task(
                     project_id,
                     template_id,
@@ -423,7 +429,7 @@ class TaskTools(BaseTool):
                     playbook=playbook,
                     git_branch=git_branch,
                     message=message,
-                    arguments=arguments,
+                    arguments=serialized_arguments,
                     inventory_id=inventory_id,
                 )
 

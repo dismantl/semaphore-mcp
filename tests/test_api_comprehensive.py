@@ -339,9 +339,14 @@ class TestSemaphoreAPIClientComprehensive:
     def test_stop_task(self, mock_client):
         """Test stop_task method."""
         mock_response = {"status": "stopped"}
-        with patch.object(mock_client, "_request", return_value=mock_response):
+        with patch.object(
+            mock_client, "_request", return_value=mock_response
+        ) as mock_request:
             result = mock_client.stop_task(1, 1)
             assert result == mock_response
+            mock_request.assert_called_once_with(
+                "POST", "project/1/tasks/1/stop", json={"force": False}
+            )
 
     def test_get_last_tasks_dict_response(self, mock_client):
         """Test get_last_tasks when API returns dict instead of list."""
@@ -1071,9 +1076,16 @@ class TestTemplateCRUDOperations:
     def test_stop_all_template_tasks(self, mock_client):
         """Test stop_all_template_tasks method."""
         mock_response = {}
-        with patch.object(mock_client, "_request", return_value=mock_response):
+        with patch.object(
+            mock_client, "_request", return_value=mock_response
+        ) as mock_request:
             result = mock_client.stop_all_template_tasks(1, 1)
             assert result == mock_response
+            mock_request.assert_called_once_with(
+                "POST",
+                "project/1/templates/1/stop_all_tasks",
+                json={"force": False},
+            )
 
 
 class TestAPIClientErrorHandling:

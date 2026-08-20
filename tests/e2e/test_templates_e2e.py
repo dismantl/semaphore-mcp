@@ -1,6 +1,7 @@
 """E2E tests for Template tools."""
 
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -111,18 +112,43 @@ class TestTemplatesE2E:
     def test_stop_all_template_tasks(
         self, inspector: MCPInspector, created_template: tuple
     ):
-        """Test stopping all tasks for a template.
-
-        Note: This just tests that the endpoint responds, even if there are no tasks.
-        """
+        """Test stopping all running tasks for a template."""
         template, project_id = created_template
 
-        result = inspector.call_tool(
-            "stop_all_template_tasks",
-            {"project_id": project_id, "template_id": template["id"]},
+        inspector.call_tool(
+            "update_template",
+            {
+                "project_id": project_id,
+                "template_id": template["id"],
+                "allow_override_args_in_task": True,
+            },
         )
-        # The result could indicate no tasks to stop, which is fine
-        assert result is not None
+
+        run_result = inspector.call_tool(
+            "run_task",
+            {
+                "project_id": project_id,
+                "template_id": template["id"],
+                "arguments": '["-e", "sleep_seconds=60"]',
+            },
+        )
+        task_id = parse_mcp_response(run_result)["task"]["id"]
+        time.sleep(3)
+
+        try:
+            result = inspector.call_tool(
+                "stop_all_template_tasks",
+                {"project_id": project_id, "template_id": template["id"]},
+            )
+            assert result is not None
+        finally:
+            try:
+                inspector.call_tool(
+                    "stop_task",
+                    {"project_id": project_id, "task_id": task_id},
+                )
+            except Exception:
+                pass
 
     def test_template_crud_workflow(
         self,

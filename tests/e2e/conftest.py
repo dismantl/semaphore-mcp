@@ -395,6 +395,7 @@ def task_test_template(
             "inventory_id": inventory["id"],
             "repository_id": repository["id"],
             "environment_id": environment["id"],
+            "allow_override_args_in_task": True,
         },
     )
     template = parse_mcp_response(result)
