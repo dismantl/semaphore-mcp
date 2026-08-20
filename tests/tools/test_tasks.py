@@ -213,6 +213,24 @@ class TestTaskTools:
         )
 
     @pytest.mark.asyncio
+    async def test_run_task_serializes_argument_list(self, task_tools):
+        """Test argument arrays are serialized for the Semaphore API."""
+        task_tools.semaphore.run_task.return_value = {
+            "id": 123,
+            "status": "scheduled",
+        }
+
+        await task_tools.run_task(
+            template_id=42,
+            project_id=1,
+            arguments=["-e", "body=hello"],
+        )
+
+        assert task_tools.semaphore.run_task.call_args.kwargs["arguments"] == (
+            '["-e", "body=hello"]'
+        )
+
+    @pytest.mark.asyncio
     async def test_run_task_without_project_id(self, task_tools):
         """Test run_task method without project_id (should look it up)."""
         # Set up mocks for project and template lookup

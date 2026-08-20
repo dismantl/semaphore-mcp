@@ -610,7 +610,9 @@ class SemaphoreAPIClient:
             Empty dict on success (204 response)
         """
         return self._request(
-            "POST", f"project/{project_id}/templates/{template_id}/stop_all_tasks"
+            "POST",
+            f"project/{project_id}/templates/{template_id}/stop_all_tasks",
+            json={"force": False},
         )
 
     # Schedule endpoints
@@ -852,7 +854,11 @@ class SemaphoreAPIClient:
 
     def stop_task(self, project_id: int, task_id: int) -> dict[str, Any]:
         """Stop a running task."""
-        return self._request("POST", f"project/{project_id}/tasks/{task_id}/stop")
+        return self._request(
+            "POST",
+            f"project/{project_id}/tasks/{task_id}/stop",
+            json={"force": False},
+        )
 
     def get_last_tasks(self, project_id: int) -> list[dict[str, Any]]:
         """Get last 200 tasks for a project (more efficient than full list)."""
