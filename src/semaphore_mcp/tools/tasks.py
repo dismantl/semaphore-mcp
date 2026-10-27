@@ -304,12 +304,88 @@ class TaskTools(BaseTool):
                     pass
             self.handle_error(e, f"getting task {task_id}")
 
+    def _merge_tags_into_arguments(
+        self, tags: Optional[str], arguments: TaskArguments
+    ) -> Optional[str]:
+        """Fold `tags` into the CLI arguments as --tags, preserving existing ones.
+
+        Accepts `arguments` as a JSON string or a string list and always returns
+        the serialized JSON-string form Semaphore expects.
+        """
+        if not tags:
+            if isinstance(arguments, list):
+                return json.dumps(arguments)
+            return arguments
+
+        argv: list[str]
+        if isinstance(arguments, list):
+            argv = list(arguments)
+        elif isinstance(arguments, str) and arguments.strip():
+            try:
+                parsed = json.loads(arguments)
+                argv = list(parsed) if isinstance(parsed, list) else [arguments]
+            except ValueError:
+                argv = [arguments]
+        else:
+            argv = []
+        argv.extend(["--tags", tags])
+        return json.dumps(argv)
+
+    def _check_override_support(
+        self,
+        project_id: int,
+        template_id: int,
+        limit: Optional[str],
+        inventory_id: Optional[int],
+    ) -> list[str]:
+        """Refuse scoping options the template will silently ignore.
+
+        Semaphore honors `limit`/`inventory_id` on a task only when the template
+        enables the matching override. Without this check the task launches and
+        runs against the full inventory while the caller believes it is scoped.
+        """
+        if limit is None and inventory_id is None:
+            return []
+        try:
+            template = self.semaphore.get_template(project_id, template_id) or {}
+        except Exception as e:
+            # Never block a launch on an introspection failure; surface it.
+            logger.warning(
+                f"Could not inspect template {template_id} for override support: {e}"
+            )
+            return []
+        errors: list[str] = []
+        task_params = template.get("task_params") or {}
+        if not isinstance(task_params, dict):
+            task_params = {}
+
+        def _override_enabled(flag: str) -> bool:
+            # Present on task_params in current Semaphore versions; some older
+            # builds flattened these onto the template object itself.
+            return bool(task_params.get(flag) or template.get(flag, False))
+
+        if limit is not None and not _override_enabled("allow_override_limit"):
+            errors.append(
+                "limit was provided but the template does not set "
+                "allow_override_limit; Semaphore would ignore it and run against "
+                "every host."
+            )
+        if inventory_id is not None and not _override_enabled(
+            "allow_override_inventory"
+        ):
+            errors.append(
+                "inventory_id was provided but the template does not set "
+                "allow_override_inventory; Semaphore would ignore it."
+            )
+        return errors
+
     async def run_task(
         self,
         template_id: int,
         project_id: Optional[int] = None,
         environment: Optional[dict[str, str]] = None,
         limit: Optional[str] = None,
+        tags: Optional[str] = None,
         dry_run: Optional[bool] = None,
         diff: Optional[bool] = None,
         debug: Optional[bool] = None,
@@ -326,7 +402,11 @@ class TaskTools(BaseTool):
             template_id: ID of the template to run
             project_id: Optional project ID (if not provided, will attempt to determine from template)
             environment: Optional environment variables for the task as dictionary
-            limit: Restrict execution to specific hosts/groups (Ansible --limit)
+            limit: Restrict execution to specific hosts/groups (Ansible --limit).
+                The template must allow limit override, otherwise the run fails
+                fast instead of silently launching against every host.
+            tags: Comma-separated Ansible tags, passed through as --tags. Prefer
+                this over nesting --tags inside `arguments`.
             dry_run: Run without making changes (Ansible --check)
             diff: Show differences when changing files (Ansible --diff)
             debug: Enable verbose debug output
@@ -334,30 +414,29 @@ class TaskTools(BaseTool):
             git_branch: Override git branch to use
             message: Task description/message
             arguments: Additional CLI arguments as a JSON string or string list
-            inventory_id: Override inventory to use
+            inventory_id: Override inventory to use. The template must allow
+                inventory override, otherwise the run fails fast like `limit`.
             follow: Enable 30-second monitoring for startup verification (default: False)
 
         Returns:
-            Task execution result with immediate web URLs and optional monitoring summary
+            Task execution result with immediate web URLs, the
+            `effective_invocation` (exactly what was sent to Semaphore), and an
+            optional monitoring summary.
 
-        Template Override Requirements:
-            Some parameters require the template to have overrides enabled in task_params.
-            Use create_template() or update_template() with task_params to enable:
-
-            - limit: requires task_params={"allow_override_limit": true}
-            - inventory_id: requires task_params={"allow_override_inventory": true}
-
-            Without these settings, the parameter will be ignored silently.
+        Scoping safety:
+            `limit` and `inventory_id` are only honored when the template
+            enables the matching override (task_params allow_override_limit /
+            allow_override_inventory). This tool checks the template BEFORE
+            launching: a scoping option Semaphore would ignore is an error,
+            never a silent full-inventory run. When scoping matters, verify the
+            `effective_invocation` field in the response.
 
         Examples:
             # Just start the task and get URLs
             result = await run_task(template_id=5)
 
-            # Start task with 30-second monitoring and get URLs
-            result = await run_task(template_id=5, follow=True)
-
-            # Run with limit to specific hosts (template must allow override)
-            result = await run_task(template_id=5, limit="webservers")
+            # Scoped run: specific hosts and Ansible tags
+            result = await run_task(template_id=5, limit="webservers", tags="nginx,deploy")
 
             # Dry run with diff to preview changes
             result = await run_task(template_id=5, dry_run=True, diff=True)
@@ -415,9 +494,24 @@ class TaskTools(BaseTool):
 
             # Now run the task with the determined project_id
             try:
-                serialized_arguments = (
-                    json.dumps(arguments) if isinstance(arguments, list) else arguments
+                # Fail fast on scoping options Semaphore would silently ignore:
+                # a template without the matching override honors neither limit
+                # nor inventory_id, and the task would run against everything.
+                scope_errors = self._check_override_support(
+                    project_id, template_id, limit=limit, inventory_id=inventory_id
                 )
+                if scope_errors:
+                    return {
+                        "error": "refused_to_launch_unscoped",
+                        "details": scope_errors,
+                        "suggestion": (
+                            "Enable the matching allow_override_* in the template's "
+                            "task_params (update_template), remove the scoping "
+                            "option, or pass the scope via `arguments` instead."
+                        ),
+                    }
+
+                serialized_arguments = self._merge_tags_into_arguments(tags, arguments)
                 task_result = self.semaphore.run_task(
                     project_id,
                     template_id,
@@ -452,6 +546,18 @@ class TaskTools(BaseTool):
                     "task": task_result,
                     "web_urls": {"task_detail": task_url, "project_tasks": project_url},
                     "message": f"Task #{task_id} started successfully!",
+                    "effective_invocation": {
+                        "template_id": template_id,
+                        "environment": environment,
+                        "limit": limit,
+                        "dry_run": dry_run,
+                        "diff": diff,
+                        "debug": debug,
+                        "playbook": playbook,
+                        "git_branch": git_branch,
+                        "arguments": serialized_arguments,
+                        "inventory_id": inventory_id,
+                    },
                     "next_steps": "Use the task_detail URL above to monitor progress in SemaphoreUI",
                 }
 
@@ -550,10 +656,23 @@ class TaskTools(BaseTool):
             task_id: ID of the task to stop
 
         Returns:
-            Task stop result
+            Task stop result with the task's post-stop status when available
         """
         try:
-            return self.semaphore.stop_task(project_id, task_id)
+            self.semaphore.stop_task(project_id, task_id)
+            status: Optional[dict[str, Any]]
+            try:
+                status = self.semaphore.get_task(project_id, task_id)
+            except Exception:
+                status = None
+            return {
+                "stopped": True,
+                "task_id": task_id,
+                "status": (status or {}).get("status")
+                if isinstance(status, dict)
+                else None,
+                "task": status,
+            }
         except Exception as e:
             self.handle_error(e, f"stopping task {task_id}")
 
