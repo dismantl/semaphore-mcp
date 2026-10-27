@@ -396,6 +396,13 @@ def task_test_template(
             "repository_id": repository["id"],
             "environment_id": environment["id"],
             "allow_override_args_in_task": True,
+            # The limit and inventory-override tests run against this
+            # template, so it must allow the overrides run_task refuses to
+            # send when the template would silently ignore them.
+            "task_params": {
+                "allow_override_limit": True,
+                "allow_override_inventory": True,
+            },
         },
     )
     template = parse_mcp_response(result)
