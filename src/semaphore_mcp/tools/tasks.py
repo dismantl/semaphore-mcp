@@ -331,6 +331,36 @@ class TaskTools(BaseTool):
         argv.extend(["--tags", tags])
         return json.dumps(argv)
 
+    def _validate_arguments_format(self, arguments: TaskArguments) -> Optional[dict]:
+        """Require string arguments to be a JSON array, as TaskRunner demands.
+
+        Semaphore's TaskRunner rejects any non-JSON or non-array argument
+        string only after the task is created, surfacing as a failed run
+        (issue #4). Failing here, before launch, tells the caller the expected
+        format instead.
+        """
+        if not isinstance(arguments, str):
+            return None
+        try:
+            parsed = json.loads(arguments)
+        except ValueError:
+            parsed = None
+        if not isinstance(parsed, list):
+            return {
+                "error": "invalid_arguments_format",
+                "details": [
+                    "arguments must be a JSON array of strings "
+                    '(e.g. ["--diff", "--tags", "app"]) or a list of strings; '
+                    "Semaphore's TaskRunner rejects anything else only after "
+                    "the task launches"
+                ],
+                "suggestion": (
+                    "Pass a list of strings, or a JSON-encoded array string. "
+                    "Use the tags parameter instead of --tags in arguments."
+                ),
+            }
+        return None
+
     def _check_override_support(
         self,
         project_id: int,
@@ -510,6 +540,10 @@ class TaskTools(BaseTool):
                             "option, or pass the scope via `arguments` instead."
                         ),
                     }
+
+                arguments_error = self._validate_arguments_format(arguments)
+                if arguments_error:
+                    return arguments_error
 
                 serialized_arguments = self._merge_tags_into_arguments(tags, arguments)
                 task_result = self.semaphore.run_task(

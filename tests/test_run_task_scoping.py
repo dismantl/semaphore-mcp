@@ -131,6 +131,56 @@ class TestEffectiveInvocation:
         assert effective["arguments"] == kwargs["arguments"]
 
 
+class TestArgumentsFormat:
+    """Regression coverage from issue #4: the argument representation must be
+    accepted at the MCP boundary AND serialize to exactly the JSON array
+    Semaphore's TaskRunner requires — never a shell string or double-encoded
+    JSON."""
+
+    @pytest.mark.asyncio
+    async def test_native_list_serializes_to_the_exact_json_array(self, task_tools):
+        await task_tools.run_task(
+            template_id=7,
+            project_id=1,
+            arguments=["--diff", "--tags", "app"],
+        )
+
+        _, kwargs = task_tools.semaphore.run_task.call_args
+        assert kwargs["arguments"] == '["--diff", "--tags", "app"]'
+
+    @pytest.mark.asyncio
+    async def test_documented_json_string_passes_through_unchanged(self, task_tools):
+        await task_tools.run_task(
+            template_id=7,
+            project_id=1,
+            arguments='["--diff", "--tags", "app"]',
+        )
+
+        _, kwargs = task_tools.semaphore.run_task.call_args
+        assert kwargs["arguments"] == '["--diff", "--tags", "app"]'
+
+    @pytest.mark.asyncio
+    async def test_shell_string_fails_fast_before_launch(self, task_tools):
+        result = await task_tools.run_task(
+            template_id=7, project_id=1, arguments="--tags app"
+        )
+
+        assert result["error"] == "invalid_arguments_format"
+        assert "JSON array" in result["details"][0]
+        task_tools.semaphore.run_task.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_double_encoded_string_fails_fast_before_launch(self, task_tools):
+        result = await task_tools.run_task(
+            template_id=7,
+            project_id=1,
+            arguments='"[\\"--diff\\"]"',
+        )
+
+        assert result["error"] == "invalid_arguments_format"
+        task_tools.semaphore.run_task.assert_not_called()
+
+
 class TestStopTaskStatus:
     @pytest.mark.asyncio
     async def test_returns_post_stop_status(self, task_tools):
