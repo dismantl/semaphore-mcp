@@ -240,8 +240,12 @@ class TestTaskExecutionE2E:
         assert data["effective_invocation"]["limit"] == "localhost"
 
     def test_run_task_refuses_limit_the_template_ignores(
-        self, inspector: MCPInspector, task_test_project: dict, task_test_environment: tuple,
-        task_test_inventory: tuple, task_test_repository: tuple,
+        self,
+        inspector: MCPInspector,
+        task_test_project: dict,
+        task_test_environment: tuple,
+        task_test_inventory: tuple,
+        task_test_repository: tuple,
     ):
         """A template without allow_override_limit must not launch scoped."""
         project_id = task_test_project["id"]
