@@ -99,6 +99,18 @@ class TestOverrideGuard:
         assert json.loads(kwargs["arguments"]) == ["--tags", "nginx"]
 
     @pytest.mark.asyncio
+    async def test_empty_arguments_do_not_request_the_args_channel(self, task_tools):
+        task_tools.semaphore.get_template.return_value = template_with(
+            {"allow_override_limit": True}
+        )
+
+        result = await task_tools.run_task(template_id=7, project_id=1, arguments=[])
+
+        assert "error" not in result
+        _, kwargs = task_tools.semaphore.run_task.call_args
+        assert kwargs["arguments"] == "[]"
+
+    @pytest.mark.asyncio
     async def test_refuses_arguments_the_template_would_drop(self, task_tools):
         task_tools.semaphore.get_template.return_value = template_with(
             {"allow_override_limit": True}
@@ -173,6 +185,29 @@ class TestEffectiveInvocation:
             )
         )
         assert merged == ["--diff", "--tags", "web,deploy"]
+
+    def test_tags_merge_preserves_unrelated_trailing_flags(self, task_tools):
+        # Regression: the merge once deleted everything after the --tags pair,
+        # silently dropping a trailing --limit and reopening the unscoped
+        # launch hole this tool guards against.
+        merged = json.loads(
+            task_tools._merge_tags_into_arguments(
+                "deploy", '["--tags", "app", "--limit", "webservers"]'
+            )
+        )
+        assert merged.count("--tags") == 1
+        assert (
+            "--limit" in merged and merged[merged.index("--limit") + 1] == "webservers"
+        )
+        assert "app,deploy" in merged
+
+    def test_tags_merge_folds_the_equals_form_and_duplicates(self, task_tools):
+        merged = json.loads(
+            task_tools._merge_tags_into_arguments(
+                "deploy", '["--diff", "--tags=app", "--tags", "web"]'
+            )
+        )
+        assert merged == ["--diff", "--tags", "app,web,deploy"]
 
 
 class TestArgumentsFormat:

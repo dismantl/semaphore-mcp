@@ -307,12 +307,16 @@ class TaskTools(BaseTool):
     def _merge_tags_into_arguments(
         self, tags: Optional[str], arguments: TaskArguments
     ) -> Optional[str]:
-        """Fold `tags` into the CLI arguments as --tags, preserving existing ones.
+        """Fold `tags` into the CLI arguments as a single --tags flag.
 
         Accepts `arguments` as a JSON string or a string list and always returns
-        the serialized JSON-string form Semaphore expects.
+        the serialized JSON-string form Semaphore expects. Every existing
+        --tags flag (both "--tags v" and "--tags=v") is merged into one
+        comma-separated value, first-occurrence order, and all other arguments
+        are preserved untouched — Ansible applies last-wins, so a second flag
+        would silently discard the earlier tags.
         """
-        if not tags:
+        if not tags or not tags.strip():
             if isinstance(arguments, list):
                 return json.dumps(arguments)
             return arguments
@@ -328,23 +332,28 @@ class TaskTools(BaseTool):
                 argv = [arguments]
         else:
             argv = []
-        if "--tags" in argv:
-            # Merge with an existing --tags value (comma-joined, first
-            # occurrence wins position) instead of appending a second flag —
-            # Ansible applies last-wins and would silently drop the earlier
-            # tags.
-            index = argv.index("--tags")
-            if index + 1 < len(argv):
-                merged: list[str] = []
-                for value in (argv[index + 1], tags):
-                    merged.extend(v for v in value.split(",") if v and v not in merged)
-                argv[index + 1] = ",".join(merged)
-                del argv[index + 2 :]
+
+        merged: list[str] = []
+        kept: list[str] = []
+        index = 0
+        while index < len(argv):
+            token = argv[index]
+            if token == "--tags" and index + 1 < len(argv):
+                merged.extend(v for v in argv[index + 1].split(",") if v)
+                index += 2
+            elif token.startswith("--tags="):
+                merged.extend(v for v in token[len("--tags=") :].split(",") if v)
+                index += 1
             else:
-                argv.insert(index + 1, tags)
-        else:
-            argv.extend(["--tags", tags])
-        return json.dumps(argv)
+                kept.append(token)
+                index += 1
+        merged.extend(v for v in tags.split(",") if v)
+        deduped: list[str] = []
+        for value in merged:
+            if value not in deduped:
+                deduped.append(value)
+        kept.extend(["--tags", ",".join(deduped)])
+        return json.dumps(kept)
 
     def _validate_arguments_format(self, arguments: TaskArguments) -> Optional[dict]:
         """Require arguments to be a JSON array of strings, as TaskRunner demands.
@@ -401,8 +410,8 @@ class TaskTools(BaseTool):
         full inventory — or without the requested tags — while the caller
         believes it is scoped.
         """
-        wants_arguments = tags is not None or (
-            arguments is not None and arguments != ""
+        wants_arguments = (tags is not None and tags.strip() != "") or (
+            arguments is not None and arguments != "" and arguments != []
         )
         if limit is None and inventory_id is None and not wants_arguments:
             return []
@@ -419,19 +428,17 @@ class TaskTools(BaseTool):
         if not isinstance(task_params, dict):
             task_params = {}
 
-        def _override_enabled(flag: str) -> bool:
-            # Present on task_params in current Semaphore versions; some older
-            # builds flattened these onto the template object itself.
-            return bool(task_params.get(flag) or template.get(flag, False))
-
-        if limit is not None and not _override_enabled("allow_override_limit"):
+        # Upstream Template carries these only inside task_params (introduced
+        # there by semaphoreui/semaphore PR #2420; no released version exposes
+        # them top-level), while allow_override_args_in_task is top-level.
+        if limit is not None and not task_params.get("allow_override_limit", False):
             errors.append(
                 "limit was provided but the template does not set "
                 "allow_override_limit; Semaphore would ignore it and run against "
                 "every host."
             )
-        if inventory_id is not None and not _override_enabled(
-            "allow_override_inventory"
+        if inventory_id is not None and not task_params.get(
+            "allow_override_inventory", False
         ):
             errors.append(
                 "inventory_id was provided but the template does not set "
