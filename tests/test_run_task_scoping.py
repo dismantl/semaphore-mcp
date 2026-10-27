@@ -22,8 +22,13 @@ async def task_tools():
     return TaskTools(mock_semaphore)
 
 
-def template_with(overrides: dict) -> dict:
-    return {"id": 7, "name": "t", "task_params": overrides}
+def template_with(overrides: dict, allow_args: bool = False) -> dict:
+    return {
+        "id": 7,
+        "name": "t",
+        "task_params": overrides,
+        "allow_override_args_in_task": allow_args,
+    }
 
 
 class TestTagsMerge:
@@ -80,7 +85,8 @@ class TestOverrideGuard:
     @pytest.mark.asyncio
     async def test_launches_when_override_is_enabled(self, task_tools):
         task_tools.semaphore.get_template.return_value = template_with(
-            {"allow_override_limit": True, "allow_override_inventory": True}
+            {"allow_override_limit": True, "allow_override_inventory": True},
+            allow_args=True,
         )
 
         result = await task_tools.run_task(
@@ -91,6 +97,32 @@ class TestOverrideGuard:
         _, kwargs = task_tools.semaphore.run_task.call_args
         assert kwargs["limit"] == "webservers"
         assert json.loads(kwargs["arguments"]) == ["--tags", "nginx"]
+
+    @pytest.mark.asyncio
+    async def test_refuses_arguments_the_template_would_drop(self, task_tools):
+        task_tools.semaphore.get_template.return_value = template_with(
+            {"allow_override_limit": True}
+        )
+
+        result = await task_tools.run_task(
+            template_id=7, project_id=1, arguments=["--diff"]
+        )
+
+        assert result["error"] == "refused_to_launch_unscoped"
+        assert any("allow_override_args_in_task" in d for d in result["details"])
+        task_tools.semaphore.run_task.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_refuses_tags_the_template_would_drop(self, task_tools):
+        task_tools.semaphore.get_template.return_value = template_with(
+            {"allow_override_limit": True}
+        )
+
+        result = await task_tools.run_task(template_id=7, project_id=1, tags="nginx")
+
+        assert result["error"] == "refused_to_launch_unscoped"
+        assert any("tags was provided" in d for d in result["details"])
+        task_tools.semaphore.run_task.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_template_introspection_failure_does_not_block(self, task_tools):
@@ -120,15 +152,27 @@ class TestEffectiveInvocation:
             diff=True,
             tags="nginx",
             message="scoped apply",
+            environment={"FOO": "bar"},
         )
 
         effective = result["effective_invocation"]
         assert effective["template_id"] == 7
         assert effective["diff"] is True
         assert effective["limit"] is None
+        assert effective["message"] == "scoped apply"
+        assert effective["environment"] == '{"FOO": "bar"}'
         assert effective["arguments"] == json.dumps(["--tags", "nginx"])
         _, kwargs = task_tools.semaphore.run_task.call_args
         assert effective["arguments"] == kwargs["arguments"]
+        assert kwargs["environment"] == {"FOO": "bar"}
+
+    def test_tags_merges_into_an_existing_tags_flag(self, task_tools):
+        merged = json.loads(
+            task_tools._merge_tags_into_arguments(
+                "web,deploy", '["--diff", "--tags", "web"]'
+            )
+        )
+        assert merged == ["--diff", "--tags", "web,deploy"]
 
 
 class TestArgumentsFormat:
@@ -139,6 +183,9 @@ class TestArgumentsFormat:
 
     @pytest.mark.asyncio
     async def test_native_list_serializes_to_the_exact_json_array(self, task_tools):
+        task_tools.semaphore.get_template.return_value = template_with(
+            {}, allow_args=True
+        )
         await task_tools.run_task(
             template_id=7,
             project_id=1,
@@ -150,6 +197,9 @@ class TestArgumentsFormat:
 
     @pytest.mark.asyncio
     async def test_documented_json_string_passes_through_unchanged(self, task_tools):
+        task_tools.semaphore.get_template.return_value = template_with(
+            {}, allow_args=True
+        )
         await task_tools.run_task(
             template_id=7,
             project_id=1,
@@ -158,6 +208,15 @@ class TestArgumentsFormat:
 
         _, kwargs = task_tools.semaphore.run_task.call_args
         assert kwargs["arguments"] == '["--diff", "--tags", "app"]'
+
+    @pytest.mark.asyncio
+    async def test_non_string_array_elements_fail_fast_before_launch(self, task_tools):
+        for bad in ('["--forks", 5]', "[null]", ["ok", 2]):
+            result = await task_tools.run_task(
+                template_id=7, project_id=1, arguments=bad
+            )
+            assert result["error"] == "invalid_arguments_format", bad
+            task_tools.semaphore.run_task.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_shell_string_fails_fast_before_launch(self, task_tools):

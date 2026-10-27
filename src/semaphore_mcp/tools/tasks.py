@@ -328,24 +328,46 @@ class TaskTools(BaseTool):
                 argv = [arguments]
         else:
             argv = []
-        argv.extend(["--tags", tags])
+        if "--tags" in argv:
+            # Merge with an existing --tags value (comma-joined, first
+            # occurrence wins position) instead of appending a second flag —
+            # Ansible applies last-wins and would silently drop the earlier
+            # tags.
+            index = argv.index("--tags")
+            if index + 1 < len(argv):
+                merged: list[str] = []
+                for value in (argv[index + 1], tags):
+                    merged.extend(v for v in value.split(",") if v and v not in merged)
+                argv[index + 1] = ",".join(merged)
+                del argv[index + 2 :]
+            else:
+                argv.insert(index + 1, tags)
+        else:
+            argv.extend(["--tags", tags])
         return json.dumps(argv)
 
     def _validate_arguments_format(self, arguments: TaskArguments) -> Optional[dict]:
-        """Require string arguments to be a JSON array, as TaskRunner demands.
+        """Require arguments to be a JSON array of strings, as TaskRunner demands.
 
-        Semaphore's TaskRunner rejects any non-JSON or non-array argument
-        string only after the task is created, surfacing as a failed run
-        (issue #4). Failing here, before launch, tells the caller the expected
-        format instead.
+        Semaphore's TaskRunner unmarshals the argument string as []string and
+        rejects anything else only after the task is created, surfacing as a
+        failed run (issue #4). Failing here, before launch, tells the caller
+        the expected format instead. Native lists are checked too because
+        direct (non-MCP) callers bypass pydantic's list[str] validation.
         """
-        if not isinstance(arguments, str):
+        parsed: object
+        if isinstance(arguments, list):
+            parsed = arguments
+        elif isinstance(arguments, str) and arguments:
+            try:
+                parsed = json.loads(arguments)
+            except ValueError:
+                parsed = None
+        else:
             return None
-        try:
-            parsed = json.loads(arguments)
-        except ValueError:
-            parsed = None
-        if not isinstance(parsed, list):
+        if not isinstance(parsed, list) or not all(
+            isinstance(item, str) for item in parsed
+        ):
             return {
                 "error": "invalid_arguments_format",
                 "details": [
@@ -367,14 +389,22 @@ class TaskTools(BaseTool):
         template_id: int,
         limit: Optional[str],
         inventory_id: Optional[int],
+        arguments: TaskArguments,
+        tags: Optional[str],
     ) -> list[str]:
         """Refuse scoping options the template will silently ignore.
 
-        Semaphore honors `limit`/`inventory_id` on a task only when the template
-        enables the matching override. Without this check the task launches and
-        runs against the full inventory while the caller believes it is scoped.
+        Semaphore honors `limit`/`inventory_id` on a task only when the
+        template enables the matching override, and uses task `arguments`
+        only under `allow_override_args_in_task` (TaskRunner drops them
+        otherwise). Without this check the task launches and runs against the
+        full inventory — or without the requested tags — while the caller
+        believes it is scoped.
         """
-        if limit is None and inventory_id is None:
+        wants_arguments = tags is not None or (
+            arguments is not None and arguments != ""
+        )
+        if limit is None and inventory_id is None and not wants_arguments:
             return []
         try:
             template = self.semaphore.get_template(project_id, template_id) or {}
@@ -406,6 +436,13 @@ class TaskTools(BaseTool):
             errors.append(
                 "inventory_id was provided but the template does not set "
                 "allow_override_inventory; Semaphore would ignore it."
+            )
+        if wants_arguments and not template.get("allow_override_args_in_task", False):
+            channel = "tags" if tags is not None else "arguments"
+            errors.append(
+                f"{channel} was provided but the template does not set "
+                "allow_override_args_in_task; Semaphore would drop them and "
+                "run the playbook's default arguments."
             )
         return errors
 
@@ -456,7 +493,9 @@ class TaskTools(BaseTool):
         Scoping safety:
             `limit` and `inventory_id` are only honored when the template
             enables the matching override (task_params allow_override_limit /
-            allow_override_inventory). This tool checks the template BEFORE
+            allow_override_inventory), and task `arguments` — including the
+            merged `tags` — are only used under the template's
+            allow_override_args_in_task. This tool checks the template BEFORE
             launching: a scoping option Semaphore would ignore is an error,
             never a silent full-inventory run. When scoping matters, verify the
             `effective_invocation` field in the response.
@@ -528,16 +567,21 @@ class TaskTools(BaseTool):
                 # a template without the matching override honors neither limit
                 # nor inventory_id, and the task would run against everything.
                 scope_errors = self._check_override_support(
-                    project_id, template_id, limit=limit, inventory_id=inventory_id
+                    project_id,
+                    template_id,
+                    limit=limit,
+                    inventory_id=inventory_id,
+                    arguments=arguments,
+                    tags=tags,
                 )
                 if scope_errors:
                     return {
                         "error": "refused_to_launch_unscoped",
                         "details": scope_errors,
                         "suggestion": (
-                            "Enable the matching allow_override_* in the template's "
-                            "task_params (update_template), remove the scoping "
-                            "option, or pass the scope via `arguments` instead."
+                            "Enable the matching allow_override_* on the template "
+                            "(limit, inventory, or args via update_template / "
+                            "create_template), or drop the scoping option."
                         ),
                     }
 
@@ -582,13 +626,16 @@ class TaskTools(BaseTool):
                     "message": f"Task #{task_id} started successfully!",
                     "effective_invocation": {
                         "template_id": template_id,
-                        "environment": environment,
+                        "environment": (
+                            json.dumps(environment) if environment else None
+                        ),
                         "limit": limit,
                         "dry_run": dry_run,
                         "diff": diff,
                         "debug": debug,
                         "playbook": playbook,
                         "git_branch": git_branch,
+                        "message": message,
                         "arguments": serialized_arguments,
                         "inventory_id": inventory_id,
                     },
@@ -684,6 +731,10 @@ class TaskTools(BaseTool):
 
     async def stop_task(self, project_id: int, task_id: int) -> dict[str, Any]:
         """Stop a running task.
+
+        Semaphore processes the stop asynchronously, so the returned status is
+        read immediately after the request and may briefly still show running
+        or queued.
 
         Args:
             project_id: ID of the project
