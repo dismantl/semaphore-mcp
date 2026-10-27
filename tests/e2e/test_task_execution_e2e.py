@@ -237,6 +237,54 @@ class TestTaskExecutionE2E:
         assert "task" in data
         task = data["task"]
         assert "id" in task
+        assert data["effective_invocation"]["limit"] == "localhost"
+
+    def test_run_task_refuses_limit_the_template_ignores(
+        self,
+        inspector: MCPInspector,
+        task_test_project: dict,
+        task_test_environment: tuple,
+        task_test_inventory: tuple,
+        task_test_repository: tuple,
+    ):
+        """A template without allow_override_limit must not launch scoped."""
+        project_id = task_test_project["id"]
+        environment, _ = task_test_environment
+        inventory, _ = task_test_inventory
+        repository, _ = task_test_repository
+
+        created = inspector.call_tool(
+            "create_template",
+            {
+                "project_id": project_id,
+                "name": "No Limit Override Template",
+                "playbook": "test.yml",
+                "inventory_id": inventory["id"],
+                "repository_id": repository["id"],
+                "environment_id": environment["id"],
+            },
+        )
+        template = parse_mcp_response(created)
+
+        try:
+            result = inspector.call_tool(
+                "run_task",
+                {
+                    "template_id": template["id"],
+                    "project_id": project_id,
+                    "limit": "localhost",
+                },
+            )
+            data = parse_mcp_response(result)
+
+            assert data.get("error") == "refused_to_launch_unscoped"
+            assert any("allow_override_limit" in d for d in data["details"])
+            assert "task" not in data
+        finally:
+            inspector.call_tool(
+                "delete_template",
+                {"project_id": project_id, "template_id": template["id"]},
+            )
 
     def test_run_task_with_git_branch(
         self, inspector: MCPInspector, task_test_template: tuple
@@ -322,6 +370,7 @@ class TestTaskExecutionE2E:
         assert "task" in data
         task = data["task"]
         assert "id" in task
+        assert data["effective_invocation"]["inventory_id"] == inventory["id"]
 
     def test_run_task_with_extra_vars(
         self, inspector: MCPInspector, task_test_template: tuple

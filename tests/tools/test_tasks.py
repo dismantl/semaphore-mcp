@@ -331,17 +331,18 @@ class TestTaskTools:
 
     @pytest.mark.asyncio
     async def test_stop_task(self, task_tools):
-        """Test stopping a task."""
-        # Mock stop task response
+        """Test stopping a task returns the post-stop status."""
         task_tools.semaphore.stop_task.return_value = {
             "status": "stopped",
             "message": "Task stopped",
         }
+        task_tools.semaphore.get_task.return_value = {"id": 123, "status": "stopped"}
 
         result = await task_tools.stop_task(1, 123)
 
-        assert "status" in result
+        assert result["stopped"] is True
         assert result["status"] == "stopped"
+        assert result["task"]["id"] == 123
         task_tools.semaphore.stop_task.assert_called_once_with(1, 123)
 
     @pytest.mark.asyncio
